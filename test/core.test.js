@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateEntry, validateSettings, sitePolicy, siteSettings } from '../src/core.js';
+import { DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateEntry, validateSettings, sitePolicy, siteSettings, translationAppearance } from '../src/core.js';
 
 export const sample = { term: 'robust', source: 'en', target: 'zh-cn', meaning: '稳健的', example: '', note: '', title: 'Example', url: 'https://example.com/article', createdAt: '2026-11-05T00:00:00.000Z' };
 
@@ -29,6 +29,40 @@ test('阅读模式、字号、行距、颜色兼容旧设置且拒绝 CSS 注入
     { translationFontSize: Infinity }, { translationLineHeight: 9 }, { translationLineHeight: NaN },
     { translationColor: 'red;display:none' }]) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
   assert.equal(validateSettings({ ...DEFAULT_SETTINGS, translationMode: 'translation-only' }).translationMode, 'translation-only');
+});
+
+test('阅读默认排版保持完整对比度，缺省字段用新默认且不覆盖已保存值', () => {
+  const defaults = validateSettings({ ...DEFAULT_SETTINGS, translationLineHeight: undefined, translationSpacing: undefined });
+  assert.equal(defaults.translationLineHeight, 1.5);
+  assert.equal(defaults.translationSpacing, 0.6);
+  const css = translationAppearance(defaults);
+  assert.match(css, /font:400 1em\/1.5 system-ui/);
+  assert.match(css, /letter-spacing:normal/);
+  assert.match(css, /padding:0.6em 0;color:inherit;opacity:1/);
+  const saved = validateSettings({ ...DEFAULT_SETTINGS, translationLineHeight: 1.7, translationSpacing: 0.35,
+    translationFontSize: 1.13, translationColor: '#123456' });
+  assert.equal(saved.translationLineHeight, 1.7);
+  assert.equal(saved.translationSpacing, 0.35);
+  assert.equal(saved.translationFontSize, 1.13);
+  assert.equal(saved.translationColor, '#123456');
+});
+
+test('显示微调兼容旧设置，允许精确值与安全颜色并拒绝越界和 CSS 注入', () => {
+  const keys = ['annotationFontSize', 'annotationColor', 'annotationSpacing', 'annotationHighlightColor', 'translationSpacing'];
+  const legacy = { ...DEFAULT_SETTINGS };
+  for (const key of keys) delete legacy[key];
+  const migrated = validateSettings(legacy);
+  for (const key of keys) assert.equal(migrated[key], DEFAULT_SETTINGS[key]);
+  const precise = { annotationFontSize: 0.93, annotationColor: '#aAbBcC', annotationSpacing: 0.17,
+    annotationHighlightColor: '#123456', translationSpacing: 0.42, translationColor: '#654321' };
+  const config = validateSettings({ ...legacy, ...precise });
+  for (const [key, value] of Object.entries(precise)) assert.equal(config[key], value);
+  for (const patch of [{ annotationFontSize: 0.49 }, { annotationFontSize: Infinity }, { annotationFontSize: '1' },
+    { annotationSpacing: -0.1 }, { annotationSpacing: 2.01 }, { annotationSpacing: NaN },
+    { translationSpacing: 3.01 }, { translationSpacing: '' },
+    { annotationColor: 'red;display:none' }, { annotationHighlightColor: '#fff' }, { translationColor: {} }]) {
+    assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
+  }
 });
 
 test('网站级源语言与目标语言覆盖精确保留旧规则，已掌握语言与词条严格校验', () => {

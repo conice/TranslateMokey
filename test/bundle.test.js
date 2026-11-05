@@ -215,7 +215,9 @@ test('样式保留不透明内容层、主题与无障碍降级，表单控件�
   assert.match(css, /\.word \{[^}]*background:transparent/);
   assert.match(css, /min-height:44px; min-width:44px/);
   assert.match(css, /font:14px\/1.5 system-ui/);
-  assert.match(css, /h2 \{ font-size:20px/);
+  assert.match(css, /h2 \{ font-size:24px; line-height:1.2; font-weight:600; letter-spacing:normal/);
+  assert.match(css, /h3 \{ font-size:18px; line-height:1.3; font-weight:600/);
+  assert.match(css, /#tm-page-settings>details>summary \{ font-size:16px; line-height:1.5; font-weight:600/);
   assert.match(css, /@media\(max-width:600px\) \{\s*label input,label textarea,label select \{ font-size:16px/);
 });
 
@@ -889,6 +891,119 @@ test('字号自动保存并立即应用，坏的服务草稿不阻止独立设�
   assert.ok(app.nodes.some((node) => node.textContent?.startsWith('未保存：')));
 });
 
+test('网页阅读与标注保持单组分节，微调预览自动保存且不发送请求', async () => {
+  const app = translationApp();
+  const control = (title) => app.nodes.find((node) => node.tag === 'label' && node.textContent === title).children[0];
+  const annotation = app.nodes.find((node) => node.tag === 'details' && node.children[0].textContent === '网页阅读与标注');
+  const reading = annotation;
+  assert.ok(annotation);
+  assert.ok(annotation.children.some((node) => node.tag === 'h3' && node.textContent === '标注'));
+  assert.ok(annotation.children.some((node) => node.tag === 'h3' && node.textContent === '网页阅读'));
+  assert.equal(app.nodes.filter((node) => node.tag === 'details'
+    && ['标注', '网页阅读'].includes(node.children[0].textContent)).length, 0);
+  assert.equal(control('标注频率').parentElement.parentElement, annotation);
+  assert.equal(control('译文字号').parentElement.parentElement, reading);
+  assert.equal(app.nodes.find((node) => node.textContent === '刷新网页标注').parentElement, annotation);
+  const preview = app.nodes.find((node) => node.getAttribute('aria-label') === '标注预览');
+  const readingPreview = app.nodes.find((node) => node.getAttribute('aria-label') === '网页阅读预览');
+  const font = control('释义字号微调（em）');
+  font.value = '0.93';
+  app.events.get(`${app.nodes.indexOf(font)}:input`)({ isTrusted: false });
+  assert.equal(app.values.get('tm:settings').value.annotationFontSize, 0.85);
+  app.events.get(`${app.nodes.indexOf(font)}:input`)({ isTrusted: true });
+  assert.equal(app.values.get('tm:settings').value.annotationFontSize, 0.93);
+  assert.equal(control('释义字号').value, 'custom');
+  assert.match(preview.children[1].children[0].style.cssText, /font:0.93em/);
+  const spacing = control('原文与译文间距微调（em）');
+  spacing.value = '0.42';
+  await app.change(spacing);
+  assert.match(readingPreview.children[1].style.cssText, /padding:0.42em 0/);
+  assert.equal(app.values.get('tm:settings').value.translationSpacing, 0.42);
+  const color = control('译文颜色微调');
+  color.value = '#123456';
+  await app.change(color);
+  assert.equal(control('译文颜色').value, 'custom');
+  assert.match(readingPreview.children[1].style.cssText, /color:#123456/);
+  const style = control('标注样式');
+  style.value = 'highlight';
+  await app.change(style);
+  assert.equal(control('释义字号').parentElement.hidden, true);
+  assert.equal(font.parentElement.hidden, true);
+  assert.equal(control('高亮颜色').parentElement.hidden, false);
+  const highlight = control('高亮颜色微调');
+  highlight.value = '#abcdef';
+  await app.change(highlight);
+  assert.match(preview.children[0].style.cssText, /background:#abcdef/);
+  assert.equal(preview.children[1].hidden, true);
+  const word = preview.children[0];
+  app.events.get(`${app.nodes.indexOf(word)}:click`)();
+  assert.equal(preview.children[1].hidden, false);
+  const mode = control('网页阅读模式');
+  mode.value = 'translation-only';
+  await app.change(mode);
+  assert.equal(readingPreview.children[0].hidden, true);
+  await app.click('设置');
+  assert.equal(font.value, '0.93');
+  assert.equal(spacing.value, '0.42');
+  assert.equal(color.value, '#123456');
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('分别恢复显示默认保留总开关、另一组、语言和网站授权', async () => {
+  const siteRules = [{ host: 'authorized.example.com', mode: 'auto', annotations: false },
+    { host: 'example.com', mode: 'manual', annotations: false }];
+  const app = translationApp({ annotations: true, annotationFrequency: 'page', annotationFontSize: 0.93,
+    annotationColor: '#123456', translationFontSize: 1.13, translationSpacing: 0.42, translationLineHeight: 1.7, knownLanguages: ['en'], siteRules });
+  await app.click('恢复标注显示默认');
+  let saved = app.values.get('tm:settings').value;
+  assert.equal(saved.annotationFontSize, DEFAULT_SETTINGS.annotationFontSize);
+  assert.equal(saved.annotationColor, DEFAULT_SETTINGS.annotationColor);
+  assert.equal(saved.annotationFrequency, 'all');
+  assert.equal(saved.annotations, true);
+  assert.equal(saved.translationFontSize, 1.13);
+  assert.equal(saved.translationSpacing, 0.42);
+  assert.equal(saved.translationLineHeight, 1.7);
+  await app.click('恢复网页阅读显示默认');
+  saved = app.values.get('tm:settings').value;
+  assert.equal(saved.translationFontSize, DEFAULT_SETTINGS.translationFontSize);
+  assert.equal(saved.translationSpacing, DEFAULT_SETTINGS.translationSpacing);
+  assert.equal(saved.translationLineHeight, DEFAULT_SETTINGS.translationLineHeight);
+  const lineHeight = app.nodes.find((node) => node.tag === 'label' && node.textContent === '译文行距').children[0];
+  const spacing = app.nodes.find((node) => node.tag === 'label' && node.textContent === '原文与译文间距').children[0];
+  assert.equal(lineHeight.value, '1.5');
+  assert.equal(spacing.value, '0.6');
+  const preview = app.nodes.find((node) => node.getAttribute('aria-label') === '网页阅读预览');
+  assert.match(preview.children[1].style.cssText, /font:400 1em\/1.5/);
+  assert.match(preview.children[1].style.cssText, /padding:0.6em 0;color:inherit;opacity:1/);
+  assert.equal(saved.annotations, true);
+  assert.equal(saved.knownLanguages.join(','), 'en');
+  assert.equal(JSON.stringify(saved.siteRules), JSON.stringify(siteRules));
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('微调越界或存储失败不应用，其他独立设置仍可保存', async () => {
+  const app = translationApp();
+  const control = (title) => app.nodes.find((node) => node.tag === 'label' && node.textContent === title).children[0];
+  const font = control('释义字号微调（em）');
+  font.value = '9';
+  await app.change(font);
+  assert.equal(app.values.get('tm:settings').value.annotationFontSize, 0.85);
+  const spacing = control('原文与译文间距微调（em）');
+  spacing.value = '0.42';
+  await app.change(spacing);
+  assert.equal(app.values.get('tm:settings').value.translationSpacing, 0.42);
+  app.failStorage();
+  spacing.value = '0.7';
+  await app.change(spacing);
+  await app.click('恢复网页阅读显示默认');
+  assert.equal(app.values.get('tm:settings').value.translationSpacing, 0.42);
+  const preview = app.nodes.find((node) => node.getAttribute('aria-label') === '网页阅读预览');
+  assert.match(preview.children[1].style.cssText, /padding:0.42em 0/);
+  assert.ok(app.nodes.some((node) => node.textContent?.startsWith('未保存：')));
+});
+
 test('已授权自动阅读网站调整字号不重复授权、不发起请求', async () => {
   const app = translationApp();
   const mode = app.nodes.find((node) => node.tag === 'select' && node.children.some((option) => option.value === 'disabled'));
@@ -976,9 +1091,9 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.scriptVersion, '0.4.2');
+  assert.equal(data.scriptVersion, '0.4.3');
   assert.equal(data.scriptVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
-  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.2\b/);
+  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.3\b/);
   assert.equal(data.build, 'unified-query');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);

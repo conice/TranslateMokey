@@ -1,4 +1,4 @@
-import { createMatcher } from './core.js';
+import { createMatcher, annotationAppearance } from './core.js';
 
 export const EXCLUDED = 'script,style,noscript,textarea,input,select,option,button,pre,code,kbd,samp,svg,math,audio,video,canvas,iframe,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[aria-hidden="true"],[translate="no"],[data-tm-host],[data-tm-note],[data-tm-translation],[data-tm-control]';
 
@@ -53,6 +53,7 @@ export function createAnnotator(document, schedule = (callback) => setTimeout(ca
       }
     }
     if (!settings.annotations || !entries.length) return;
+    const appearance = annotationAppearance(settings);
     const pageLanguage = document.documentElement.lang.toLowerCase();
     const source = settings.source !== 'auto' ? settings.source : pageLanguage || 'auto';
     const selected = entries.filter((entry) => !entry.mastered || settings.masteredDisplay !== 'hide');
@@ -93,8 +94,7 @@ export function createAnnotator(document, schedule = (callback) => setTimeout(ca
             splits.push({ head: node, tail: word });
             const wrapper = document.createElement('span');
             wrapper.dataset.tmMark = '';
-            wrapper.style.cssText = settings.annotationStyle === 'underline'
-              ? 'text-decoration:underline dotted;cursor:pointer' : 'background:#ffe69a;color:#222;cursor:pointer';
+            wrapper.style.cssText = appearance.word;
             wrapper.setAttribute('role', 'button');
             wrapper.setAttribute('tabindex', '0');
             wrapper.setAttribute('aria-label', `${hit.entry.term}：查看释义`);
@@ -105,6 +105,7 @@ export function createAnnotator(document, schedule = (callback) => setTimeout(ca
           }
           const note = document.createElement('span');
           note.dataset.tmNote = '';
+          note.style.cssText = appearance.note;
           if (hit.entry.mastered && settings.masteredDisplay === 'dim') {
             note.style.opacity = '0.45';
             if (word) word.style.opacity = '0.45';
@@ -113,7 +114,7 @@ export function createAnnotator(document, schedule = (callback) => setTimeout(ca
           const compact = settings.annotationStyle === 'compact';
           const label = document.createElement(compact ? 'button' : 'span');
           label.textContent = compact ? '〔释义〕' : `〔${hit.entry.meaning}〕`;
-          label.style.cssText = 'color:#17684a;font:0.85em/1.5 system-ui;overflow-wrap:anywhere';
+          label.style.cssText = appearance.label;
           if (decorated) {
             note.style.display = 'none';
             const toggle = () => { note.style.display = note.style.display === 'none' ? '' : 'none'; };

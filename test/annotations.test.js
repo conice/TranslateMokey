@@ -83,6 +83,17 @@ function fixture(texts, excluded = false) {
 const entries = [{ term: 'robust', source: 'en', target: 'zh-cn', meaning: '<img onerror=alert(1)>' }];
 const settings = { annotations: true, source: 'auto', target: 'zh-cn' };
 
+test('释义字号、颜色和间距应用到标注，刷新保留原文', () => {
+  const page = fixture(['robust']);
+  page.annotator.refresh(entries, { ...settings, annotationFontSize: 0.93, annotationColor: '#123456', annotationSpacing: 0.17 });
+  page.flush();
+  const note = page.notes()[0];
+  assert.match(note.label.style.cssText, /color:#123456;font:0.93em/);
+  assert.match(note.style.cssText, /margin-inline-start:0.17em/);
+  page.annotator.clear();
+  assert.equal(page.originals[0].textContent, 'robust');
+});
+
 test('关联词形沿用词条标注频率，关闭恢复原始词形文本', () => {
   const { document } = createDOM();
   const paragraph = document.createElement('p');
@@ -111,11 +122,12 @@ for (const annotationStyle of ['underline', 'highlight']) {
     document.body.append(paragraph);
     const jobs = [];
     const annotator = createAnnotator(document, (job) => jobs.push(job));
-    annotator.refresh(entries, { ...settings, annotationStyle });
+    annotator.refresh(entries, { ...settings, annotationStyle, annotationHighlightColor: '#abcdef' });
     while (jobs.length) jobs.shift()();
     const marked = paragraph.querySelector('[data-tm-mark]');
     const note = paragraph.querySelector('[data-tm-note]');
     assert.equal(marked.textContent, 'robust');
+    if (annotationStyle === 'highlight') assert.match(marked.style.cssText, /background:#abcdef/);
     assert.equal(note.style.display, 'none');
     marked.click();
     assert.equal(note.style.display, '');

@@ -1,4 +1,4 @@
-import { INDEX_PRESET, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings } from './core.js';
+import { DEFAULT_SETTINGS, INDEX_PRESET, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings, annotationAppearance, translationAppearance } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
 import { createTranslationQueue } from './queue.js';
 import { createReader } from './reader.js';
@@ -34,6 +34,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     input[type=checkbox] { display:inline-block; width:22px; height:22px; min-height:0; margin:0 10px 0 0; vertical-align:middle; accent-color:var(--accent); }
     textarea { min-height:96px; resize:vertical; } label { display:block; min-height:44px; margin:16px 0; overflow-wrap:anywhere; font-size:13px; }
     label input,label textarea,label select { font-size:14px; line-height:1.5; }
+    .appearance-preview { border-block:1px solid var(--line); padding:16px 0; margin:16px 0; font-size:16px; overflow-wrap:anywhere; }
     label:has(input[type=checkbox]) { padding:10px 0; }
     :focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
     .launcher { position:fixed; right:calc(16px + env(safe-area-inset-right,0px)); bottom:calc(20px + env(safe-area-inset-bottom,0px));
@@ -61,7 +62,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     nav button[aria-current=page],.subnav button[aria-current=page] { color:var(--ink)!important; font-weight:650; text-decoration:underline; text-underline-offset:8px; }
     .subnav { display:flex; flex-wrap:wrap; gap:8px; padding:12px 28px 0; font-size:13px; }
     .page { padding:24px 32px 32px; } .page>button,.word>button { margin:4px 4px 4px 0; }
-    h2 { font-size:20px; line-height:1.3; font-weight:650; letter-spacing:-.025em; margin:0 0 20px; overflow-wrap:anywhere; }
+    h2 { font-size:24px; line-height:1.2; font-weight:600; letter-spacing:normal; margin:0 0 24px; overflow-wrap:anywhere; }
     .page-title { margin-top:4px; }
     .help-trigger { flex:none; padding:4px; border:0; border-radius:50%; color:var(--accent); background:transparent; font-size:1.2em; }
     .context-help { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:4px 0; }
@@ -69,7 +70,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     details { margin:16px 0; border:0; padding:0; background:transparent; }
     summary { cursor:pointer; min-height:44px; padding:12px 0; font-weight:500; }
     #tm-page-settings>details { margin:0; padding:8px 0; border-top:1px solid var(--line); }
-    #tm-page-settings>details>summary { font-size:1.06em; }
+    #tm-page-settings>details>summary { font-size:16px; line-height:1.5; font-weight:600; }
     #tm-page-settings>details[open] { padding-bottom:24px; }
     .field-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
     .result-text { white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -87,7 +88,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     .icon-button svg { flex:none; }
     .icon-button[aria-label] { text-decoration:none!important; }
     .word>strong { display:block; font-size:18px; line-height:1.3; font-weight:600; }
-    #tm-page-translate .result-text { font-size:calc(16px * var(--translation-scale,1)); line-height:var(--translation-leading,1.7); }
+    #tm-page-translate .result-text { font-size:calc(16px * var(--translation-scale,1)); line-height:var(--translation-leading,1.5); }
     #tm-page-review .word { padding:32px 0; text-align:center; }
     #tm-page-review .word>strong { font-size:24px; }
     #tm-page-review .row { justify-content:center; }
@@ -99,7 +100,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     .help-dialog::backdrop { background:#0006; }
     .help-dialog h2 { flex:1; margin:0; font-size:1.4em; }
     .help-dialog p { white-space:pre-wrap; } .help-dialog header { margin-bottom:16px; }
-    h3 { font-size:1.1em; margin:28px 0 12px; overflow-wrap:anywhere; }
+    h3 { font-size:18px; line-height:1.3; font-weight:600; letter-spacing:normal; margin:32px 0 16px; overflow-wrap:anywhere; }
     p { margin:10px 0; overflow-wrap:anywhere; } .hint { font-size:13px; color:var(--muted); }
     .status { white-space:pre-wrap; padding:8px 0; font-size:13px; color:var(--muted); }
     .panel>.status { margin:0 32px 24px; } .status:empty,.word:empty { display:none; }
@@ -1030,7 +1031,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   popupLabel.prepend(popupInput);
   settingsPage.append(popupLabel);
   help(settingsPage, '费用确认', '默认保留 AI 请求前确认。关闭确认后，点击选区入口可能直接发送文本并产生费用；关闭弹窗不代表免费，不影响词典、网页阅读、删除或覆盖确认。');
-  const annotationLabel = element('label', '开启本地词后释义（区分大小写，动态内容自动刷新）');
+  const annotationLabel = element('label', '开启本地生词标注（区分大小写，动态内容自动刷新）');
   const annotationInput = element('input');
   annotationInput.type = 'checkbox';
   annotationLabel.prepend(annotationInput);
@@ -1045,6 +1046,29 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     label.append(select);
     settingsPage.append(label);
     return select;
+  }
+  const fineControls = new Map();
+  function fineChoice(title, options, type, minimum, maximum, step) {
+    const preset = choice(title, [...options, ['custom', '自定义']]);
+    const input = field(settingsPage, `${title}微调${type === 'number' && title !== '译文行距' ? '（em）' : ''}`);
+    input.type = type;
+    if (type === 'number') {
+      input.min = minimum; input.max = maximum; input.step = step;
+      input.parentElement.append(element('small', `范围 ${minimum}–${maximum}，步长 ${step}。`));
+    }
+    fineControls.set(preset, { input, options, type });
+    return preset;
+  }
+  function fineValue(preset) {
+    const { input, type } = fineControls.get(preset);
+    return type === 'number' ? (input.value.trim() ? Number(input.value) : NaN)
+      : preset.value === 'custom' ? input.value : preset.value;
+  }
+  function loadFine(preset, value) {
+    const { input, options, type } = fineControls.get(preset);
+    preset.value = options.some(([option]) => option === String(value)) ? String(value) : 'custom';
+    input.value = type === 'color' && !String(value).startsWith('#')
+      ? value === 'accent' ? '#17684a' : value === 'muted' ? '#666666' : '#222222' : String(value);
   }
   settingsPage = group(settingsRoot, '词典来源与解析');
   const dictionaryMode = choice('词典类型', [['bing', '微软 Bing 词典（默认）'], ['json', '自定义 JSON 词典'], ['javascript', '自定义 JS 解析词典']]);
@@ -1073,18 +1097,98 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       report('已恢复微软词典；未发送请求。');
     }));
   settingsPage = group(settingsRoot, '网页阅读与标注');
+  settingsPage.append(element('h3', '标注'));
   settingsPage.append(annotationLabel);
   help(settingsPage, '标注范围', '仅匹配单个文本节点内完整词/短语，跳过代码、编辑区域和译文；支持动态刷新，不支持 CJK 分词或跨标签短语。auto 词条表示源语言未确认。');
-  settingsPage.append(element('p', '字号与行距立即生效；网页阅读仍需单独确认开启。', 'hint'),
-    button('打开网页阅读', () => open('reading', false)));
   const frequencyInput = choice('标注频率', [['all', '每次出现'], ['page', '每页首次'], ['paragraph', '每段首次']]);
   const annotationStyleInput = choice('标注样式', [['inline', '词后释义'], ['compact', '点击展开释义'], ['underline', '下划线与词义卡片'], ['highlight', '仅高亮（点击查看）']]);
-  const translationModeInput = choice('网页阅读模式', [['bilingual', '双语显示'], ['translation-only', '仅显示译文']]);
-  const translationFontSizeInput = choice('译文字号', [['0.85', '小（85%）'], ['1', '标准（100%）'], ['1.15', '大（115%）'], ['1.3', '特大（130%）']]);
-  const translationLineHeightInput = choice('译文行距', [['1.4', '紧凑'], ['1.7', '标准'], ['2.1', '宽松'], ['2.5', '特宽']]);
-  const translationColorInput = choice('译文颜色', [['inherit', '跟随网页'], ['muted', '柔和灰'], ['accent', '绿色']]);
+  const annotationFontSizeInput = fineChoice('释义字号', [['0.75', '小（75%）'], ['0.85', '标准（85%）'], ['1', '大（100%）']], 'number', 0.5, 2, 0.01);
+  const annotationColorInput = fineChoice('释义颜色', [['#17684a', '绿色'], ['#666666', '柔和灰'], ['#0066cc', '蓝色']], 'color');
+  const annotationSpacingInput = fineChoice('原词与释义间距', [['0', '无间距'], ['0.15', '紧凑'], ['0.3', '宽松']], 'number', 0, 2, 0.01);
+  const annotationHighlightInput = fineChoice('高亮颜色', [['#ffe69a', '浅黄'], ['#c8eed9', '浅绿'], ['#cfe6ff', '浅蓝']], 'color');
   const masteredDisplayInput = choice('已掌握词标注', [['hide', '隐藏'], ['dim', '淡化'], ['show', '正常显示']]);
+  settingsPage.append(element('p', '显示参数即时生效；预览仅使用本地示例，不查询词典或 AI。点击原词或释义按钮可展开示例。', 'hint'));
+  const annotationPreview = element('p', '', 'appearance-preview');
+  annotationPreview.setAttribute('aria-label', '标注预览');
+  settingsPage.append(annotationPreview, button('恢复标注显示默认', () => resetAppearance('annotation')),
+    button('刷新网页标注', () => { refreshAnnotations(); report('已安排本地标注扫描'); }));
+  settingsPage.append(element('h3', '网页阅读'));
+  settingsPage.append(element('p', '字号、行距、颜色与间距即时生效；网页阅读仍需单独确认开启。预览仅使用本地示例，不发送请求。', 'hint'),
+    button('打开网页阅读', () => open('reading', false)));
+  const translationModeInput = choice('网页阅读模式', [['bilingual', '双语显示'], ['translation-only', '仅显示译文']]);
+  const translationFontSizeInput = fineChoice('译文字号', [['0.85', '小（85%）'], ['1', '标准（100%）'], ['1.15', '大（115%）'], ['1.3', '特大（130%）']], 'number', 0.75, 2, 0.01);
+  const translationLineHeightInput = fineChoice('译文行距', [['1.4', '紧凑'], [String(DEFAULT_SETTINGS.translationLineHeight), '标准'], ['1.7', '舒展'], ['2.1', '宽松'], ['2.5', '特宽']], 'number', 1.2, 3, 0.01);
+  const translationColorInput = fineChoice('译文颜色', [['inherit', '跟随网页'], ['muted', '柔和灰'], ['accent', '绿色']], 'color');
+  const translationSpacingInput = fineChoice('原文与译文间距', [['0', '无间距'], ['0.35', '紧凑'], [String(DEFAULT_SETTINGS.translationSpacing), '标准'], ['0.7', '宽松']], 'number', 0, 3, 0.01);
   const knownLanguagesInput = field(settingsPage, '已掌握语言（逗号分隔；只跳过明确指定的源语言，不猜测 auto）', false, 1100);
+  const readingPreview = element('div', '', 'appearance-preview');
+  readingPreview.setAttribute('aria-label', '网页阅读预览');
+  settingsPage.append(readingPreview, button('恢复网页阅读显示默认', () => resetAppearance('reading')));
+  function updateAppearancePreview() {
+    const highlight = settings.annotationStyle === 'highlight';
+    for (const preset of [annotationFontSizeInput, annotationColorInput, annotationSpacingInput]) {
+      preset.parentElement.hidden = highlight;
+      fineControls.get(preset).input.parentElement.hidden = highlight;
+    }
+    annotationHighlightInput.parentElement.hidden = !highlight;
+    fineControls.get(annotationHighlightInput).input.parentElement.hidden = !highlight;
+    const appearance = annotationAppearance(settings);
+    const word = element('span', 'robust');
+    const note = element('span');
+    note.style.cssText = appearance.note;
+    const compact = settings.annotationStyle === 'compact';
+    const label = element(compact ? 'button' : 'span', compact ? '〔释义〕' : '〔稳健的〕');
+    label.style.cssText = appearance.label;
+    note.append(label);
+    if (['underline', 'highlight'].includes(settings.annotationStyle)) {
+      word.style.cssText = appearance.word;
+      word.setAttribute('role', 'button');
+      word.setAttribute('tabindex', '0');
+      word.setAttribute('aria-label', 'robust：查看示例释义');
+      note.hidden = true;
+      const toggle = () => { note.hidden = !note.hidden; word.setAttribute('aria-expanded', String(!note.hidden)); };
+      word.setAttribute('aria-expanded', 'false');
+      word.addEventListener('click', toggle);
+      word.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+      });
+      if (settings.annotationStyle === 'underline') {
+        word.addEventListener('mouseenter', () => { note.hidden = false; word.setAttribute('aria-expanded', 'true'); });
+        word.addEventListener('mouseleave', () => { note.hidden = true; word.setAttribute('aria-expanded', 'false'); });
+      }
+    }
+    if (compact) {
+      label.type = 'button';
+      label.style.cssText += ';min-height:44px;cursor:pointer';
+      label.setAttribute('aria-expanded', 'false');
+      label.addEventListener('click', () => {
+        const expanded = label.getAttribute('aria-expanded') !== 'true';
+        label.textContent = expanded ? '〔稳健的〕' : '〔释义〕';
+        label.setAttribute('aria-expanded', String(expanded));
+      });
+    }
+    annotationPreview.replaceChildren(word, note, element('span', ' design.'));
+    const original = element('div', 'A robust design stays clear and readable.');
+    original.hidden = settings.translationMode === 'translation-only';
+    const translation = element('div', '稳健的设计保持清晰易读。');
+    translation.style.cssText = translationAppearance(settings);
+    readingPreview.replaceChildren(original, translation);
+  }
+  function resetAppearance(section) {
+    const keys = section === 'annotation'
+      ? ['annotationFrequency', 'annotationStyle', 'annotationFontSize', 'annotationColor', 'annotationSpacing', 'annotationHighlightColor', 'masteredDisplay']
+      : ['translationMode', 'translationFontSize', 'translationLineHeight', 'translationColor', 'translationSpacing'];
+    autoSave(() => {
+      const next = validateSettings({ ...store.settings(), ...Object.fromEntries(keys.map((key) => [key, DEFAULT_SETTINGS[key]])) });
+      store.saveSettings(next);
+      settings = next;
+      applyTypography();
+      if (section === 'reading') { reader.updateAppearance(next); updateReadingControls(); }
+      else refreshAnnotations();
+      loadAppearanceSettings();
+      return true;
+    });
+  }
   settingsPage = group(settingsRoot, '当前网站规则');
   const siteModeInput = choice('当前域名翻译规则（精确匹配，不含子域名）', [['manual', '手动翻译'], ['auto', '自动双语阅读'], ['disabled', '禁用翻译']]);
   const siteSourceInput = field(settingsPage, '当前网站源语言（留空跟随默认）', false, 35);
@@ -1102,7 +1206,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.2',
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.3',
       build: 'unified-query', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
@@ -1161,9 +1265,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
       lookupProvider: providerInput.value, launcherAction: launcherInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
       annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
+      annotationFontSize: fineValue(annotationFontSizeInput), annotationColor: fineValue(annotationColorInput),
+      annotationSpacing: fineValue(annotationSpacingInput), annotationHighlightColor: fineValue(annotationHighlightInput),
       translationStyle: 'muted', translationMode: translationModeInput.value,
-      translationFontSize: Number(translationFontSizeInput.value), translationLineHeight: Number(translationLineHeightInput.value),
-      translationColor: translationColorInput.value, masteredDisplay: masteredDisplayInput.value,
+      translationFontSize: fineValue(translationFontSizeInput), translationLineHeight: fineValue(translationLineHeightInput),
+      translationColor: fineValue(translationColorInput), translationSpacing: fineValue(translationSpacingInput), masteredDisplay: masteredDisplayInput.value,
       knownLanguages: knownLanguagesInput.value.split(',').map((value) => value.trim()).filter(Boolean), siteRules };
     const keys = section === 'service' ? ['protocol', 'endpoint', 'model', 'extra']
       : section === 'site' ? ['siteRules'] : [section];
@@ -1175,8 +1281,9 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     store.saveSettings(next);
     settings = next;
     applyTypography();
+    updateAppearancePreview();
     if (!affectsRequests) {
-      if (['translationFontSize', 'translationLineHeight', 'translationColor', 'translationMode'].includes(section)) { reader.updateAppearance(next); updateReadingControls(); }
+      if (['translationFontSize', 'translationLineHeight', 'translationColor', 'translationSpacing', 'translationMode'].includes(section)) { reader.updateAppearance(next); updateReadingControls(); }
       if (section === 'lookupProvider') setQueryMode(next.lookupProvider);
       refreshAnnotations();
       return true;
@@ -1208,19 +1315,34 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     [protocolInput, 'service'], [endpointInput, 'service'], [modelInput, 'service'], [extraInput, 'service'],
     [popupInput, 'hideFeePopup'], [annotationInput, 'annotations'], [frequencyInput, 'annotationFrequency'],
     [annotationStyleInput, 'annotationStyle'], [translationModeInput, 'translationMode'],
+    [annotationFontSizeInput, 'annotationFontSize'], [annotationColorInput, 'annotationColor'],
+    [annotationSpacingInput, 'annotationSpacing'], [annotationHighlightInput, 'annotationHighlightColor'],
     [translationFontSizeInput, 'translationFontSize'], [translationLineHeightInput, 'translationLineHeight'],
-    [translationColorInput, 'translationColor'], [masteredDisplayInput, 'masteredDisplay'],
+    [translationColorInput, 'translationColor'], [translationSpacingInput, 'translationSpacing'], [masteredDisplayInput, 'masteredDisplay'],
     [knownLanguagesInput, 'knownLanguages'], [siteModeInput, 'site'], [siteSourceInput, 'site'],
     [siteTargetInput, 'site'], [siteAnnotationInput, 'site'],
-  ]) input.addEventListener('change', (event) => {
-    if (!event.isTrusted) return;
-    if (section === 'service') updateKeyStatus();
-    autoSave(() => saveSettings(section));
-  });
+  ]) {
+    input.addEventListener('change', (event) => {
+      if (!event.isTrusted) return;
+      if (section === 'service') updateKeyStatus();
+      if (fineControls.has(input) && input.value !== 'custom') loadFine(input, input.value);
+      autoSave(() => saveSettings(section));
+    });
+    const fine = fineControls.get(input);
+    if (fine) {
+      const saveFine = (event) => {
+        if (!event.isTrusted) return;
+        const value = fine.type === 'number' ? (fine.input.value.trim() ? Number(fine.input.value) : NaN) : fine.input.value;
+        input.value = fine.options.some(([option]) => option === String(value)) ? String(value) : 'custom';
+        autoSave(() => saveSettings(section));
+      };
+      fine.input.addEventListener('input', saveFine);
+      fine.input.addEventListener('change', saveFine);
+    }
+  }
   for (const input of [dictionaryMode, dictionaryTemplate, dictionaryScript]) {
     input.addEventListener('change', (event) => { if (event.isTrusted) autoSave(saveDictionarySettings); });
   }
-  settingsRoot.append(button('刷新网页标注', () => { refreshAnnotations(); report('已安排本地标注扫描'); }));
   help(diagnosticGroup, '日志内容', '诊断日志最多保留 300 条，记录事件、长度、开关与面板尺寸，不含原文、译文、URL、密钥或错误正文；仅本地保存，不自动上传。');
   const diagnosticPreview = field(diagnosticGroup, '诊断日志（下载失败时可全选复制）', true, 500000);
   diagnosticPreview.readOnly = true;
@@ -1247,13 +1369,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     providerInput.value = settings.lookupProvider;
     launcherInput.value = settings.launcherAction;
     popupInput.checked = settings.hideFeePopup;
-    frequencyInput.value = settings.annotationFrequency;
-    annotationStyleInput.value = settings.annotationStyle;
-    translationModeInput.value = settings.translationMode;
-    translationFontSizeInput.value = String(settings.translationFontSize);
-    translationLineHeightInput.value = String(settings.translationLineHeight);
-    translationColorInput.value = settings.translationColor;
-    masteredDisplayInput.value = settings.masteredDisplay;
+    loadAppearanceSettings();
     knownLanguagesInput.value = settings.knownLanguages.join(', ');
     const policy = sitePolicy(settings, window.location?.hostname);
     siteModeInput.value = policy.mode;
@@ -1262,6 +1378,19 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     siteTargetInput.value = policy.target || '';
     updateKeyStatus();
     applyTypography();
+  }
+  function loadAppearanceSettings() {
+    frequencyInput.value = settings.annotationFrequency;
+    annotationStyleInput.value = settings.annotationStyle;
+    masteredDisplayInput.value = settings.masteredDisplay;
+    translationModeInput.value = settings.translationMode;
+    for (const [preset, key] of [
+      [annotationFontSizeInput, 'annotationFontSize'], [annotationColorInput, 'annotationColor'],
+      [annotationSpacingInput, 'annotationSpacing'], [annotationHighlightInput, 'annotationHighlightColor'],
+      [translationFontSizeInput, 'translationFontSize'], [translationLineHeightInput, 'translationLineHeight'],
+      [translationColorInput, 'translationColor'], [translationSpacingInput, 'translationSpacing'],
+    ]) loadFine(preset, settings[key]);
+    updateAppearancePreview();
   }
   function refreshAnnotations() {
     const config = siteSettings(store.settings(), window.location?.hostname);

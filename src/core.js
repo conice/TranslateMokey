@@ -17,11 +17,16 @@ export const DEFAULT_SETTINGS = Object.freeze({
   hideFeePopup: false,
   annotationFrequency: 'all',
   annotationStyle: 'inline',
+  annotationFontSize: 0.85,
+  annotationColor: '#17684a',
+  annotationSpacing: 0,
+  annotationHighlightColor: '#ffe69a',
   translationStyle: 'muted',
   translationMode: 'bilingual',
   translationFontSize: 1,
-  translationLineHeight: 1.7,
+  translationLineHeight: 1.5,
   translationColor: 'inherit',
+  translationSpacing: 0.6,
   masteredDisplay: 'hide',
   knownLanguages: [],
   siteRules: [],
@@ -104,24 +109,39 @@ export function validateSettings(value) {
   }
   const annotationFrequency = value.annotationFrequency ?? 'all';
   const annotationStyle = value.annotationStyle ?? 'inline';
+  const annotationFontSize = value.annotationFontSize ?? DEFAULT_SETTINGS.annotationFontSize;
+  const annotationColor = value.annotationColor ?? DEFAULT_SETTINGS.annotationColor;
+  const annotationSpacing = value.annotationSpacing ?? DEFAULT_SETTINGS.annotationSpacing;
+  const annotationHighlightColor = value.annotationHighlightColor ?? DEFAULT_SETTINGS.annotationHighlightColor;
   const translationStyle = value.translationStyle ?? 'muted';
   const translationMode = value.translationMode ?? 'bilingual';
-  const translationFontSize = value.translationFontSize ?? 1;
-  const translationLineHeight = value.translationLineHeight ?? 1.7;
+  const translationFontSize = value.translationFontSize ?? DEFAULT_SETTINGS.translationFontSize;
+  const translationLineHeight = value.translationLineHeight ?? DEFAULT_SETTINGS.translationLineHeight;
   const translationColor = value.translationColor ?? (translationStyle === 'accent' ? 'accent' : 'inherit');
+  const translationSpacing = value.translationSpacing ?? DEFAULT_SETTINGS.translationSpacing;
   const masteredDisplay = value.masteredDisplay ?? 'hide';
   if (!['hide', 'dim', 'show'].includes(masteredDisplay)) throw new Error('已掌握词显示策略无效');
   if (!Array.isArray(value.knownLanguages ?? []) || (value.knownLanguages ?? []).length > 30) throw new Error('已掌握语言列表无效');
   const knownLanguages = [...new Set((value.knownLanguages ?? []).map((code) => language(code)))];
   if (!['all', 'page', 'paragraph'].includes(annotationFrequency)) throw new Error('标注频率无效');
   if (!['inline', 'compact', 'underline', 'highlight'].includes(annotationStyle)) throw new Error('标注样式无效');
+  for (const [number, minimum, maximum, title] of [
+    [annotationFontSize, 0.5, 2, '释义字号'], [annotationSpacing, 0, 2, '原词与释义间距'],
+    [translationSpacing, 0, 3, '原文与译文间距'],
+  ]) {
+    if (typeof number !== 'number' || !Number.isFinite(number) || number < minimum || number > maximum) throw new Error(`${title}无效`);
+  }
+  for (const color of [annotationColor, annotationHighlightColor]) {
+    if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) throw new Error('标注颜色无效');
+  }
   if (!['muted', 'accent'].includes(translationStyle)) throw new Error('译文样式无效');
   if (!['bilingual', 'translation-only'].includes(translationMode)) throw new Error('网页阅读模式无效');
   if (typeof translationFontSize !== 'number' || !Number.isFinite(translationFontSize)
     || translationFontSize < 0.75 || translationFontSize > 2) throw new Error('译文字号无效');
   if (typeof translationLineHeight !== 'number' || !Number.isFinite(translationLineHeight)
     || translationLineHeight < 1.2 || translationLineHeight > 3) throw new Error('译文行距无效');
-  if (!['inherit', 'accent', 'muted'].includes(translationColor)) throw new Error('译文颜色无效');
+  if (typeof translationColor !== 'string'
+    || (!['inherit', 'accent', 'muted'].includes(translationColor) && !/^#[0-9a-f]{6}$/i.test(translationColor))) throw new Error('译文颜色无效');
   const rules = value.siteRules ?? [];
   if (!Array.isArray(rules) || rules.length > 100) throw new Error('网站规则最多 100 条');
   const siteRules = rules.map((rule) => {
@@ -141,9 +161,25 @@ export function validateSettings(value) {
     extra: JSON.parse(JSON.stringify(extra)), annotations: value.annotations,
     autoTranslate: value.autoTranslate ?? false, hideFeePopup: value.hideFeePopup ?? false,
     annotationFrequency, annotationStyle, translationStyle, siteRules,
-    translationMode, translationFontSize, translationLineHeight, translationColor,
+    annotationFontSize, annotationColor, annotationSpacing, annotationHighlightColor,
+    translationMode, translationFontSize, translationLineHeight, translationColor, translationSpacing,
     masteredDisplay, knownLanguages,
   };
+}
+
+export function annotationAppearance(settings) {
+  return {
+    label: `color:${settings.annotationColor ?? DEFAULT_SETTINGS.annotationColor};font:${settings.annotationFontSize ?? DEFAULT_SETTINGS.annotationFontSize}em/1.5 system-ui;overflow-wrap:anywhere`,
+    note: `margin-inline-start:${settings.annotationSpacing ?? DEFAULT_SETTINGS.annotationSpacing}em`,
+    word: settings.annotationStyle === 'underline' ? 'text-decoration:underline dotted;cursor:pointer'
+      : `background:${settings.annotationHighlightColor ?? DEFAULT_SETTINGS.annotationHighlightColor};color:#222;cursor:pointer`,
+  };
+}
+
+export function translationAppearance(settings) {
+  const color = settings.translationColor === 'accent' ? '#17684a'
+    : settings.translationColor === 'muted' ? '#666' : settings.translationColor;
+  return `display:block;font:400 ${settings.translationFontSize}em/${settings.translationLineHeight} system-ui,-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;letter-spacing:normal;white-space:pre-wrap;overflow-wrap:anywhere;padding:${settings.translationSpacing ?? DEFAULT_SETTINGS.translationSpacing}em 0;color:${color};opacity:1`;
 }
 
 export function sitePolicy(settings, hostname) {

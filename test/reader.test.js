@@ -218,15 +218,18 @@ test('修改外观立即更新已有译文，后续译文沿用且不重新请�
   app.tasks[0].resolve('第一');
   await tick();
   const note = first.querySelector('[data-tm-translation]');
-  app.reader.updateAppearance({ ...DEFAULT_SETTINGS, translationFontSize: 0.85, translationLineHeight: 2.1 });
+  app.reader.updateAppearance({ ...DEFAULT_SETTINGS, translationFontSize: 0.85, translationLineHeight: 2.1,
+    translationSpacing: 0.42, translationColor: '#123456' });
   assert.equal(first.querySelector('[data-tm-translation]'), note);
   assert.match(note.label.style.cssText, /0.85em\/2.1/);
+  assert.match(note.label.style.cssText, /padding:0.42em 0;color:#123456/);
   assert.equal(app.tasks.length, 1);
   app.enter(second);
   await tick();
   app.tasks[1].resolve('第二');
   await tick();
   assert.match(second.querySelector('[data-tm-translation]').label.style.cssText, /0.85em\/2.1/);
+  assert.match(second.querySelector('[data-tm-translation]').label.style.cssText, /padding:0.42em 0;color:#123456/);
   assert.equal(app.tasks.length, 2);
 });
 
@@ -256,6 +259,23 @@ test('逐段模式不自动请求，可信点击翻译，重译取消旧任务�
   await tick();
   assert.equal(app.tasks.length, 0);
   const buttons = block.querySelector('[data-tm-control]').shadow.children;
+  assert.equal(buttons.length, 2);
+  for (const [index, label] of ['翻译本段', '重新翻译'].entries()) {
+    const button = buttons[index];
+    assert.equal(button.type, 'button');
+    assert.equal(button.attributes['aria-label'], label);
+    assert.equal(button.title, label);
+    assert.equal(button.textContent, '');
+    assert.match(button.style.cssText, /width:44px;height:44px;min-width:44px;min-height:44px/);
+    const svg = button.firstChild;
+    assert.equal(svg.namespaceURI, 'http://www.w3.org/2000/svg');
+    assert.equal(svg.attributes.width, '20');
+    assert.equal(svg.attributes.height, '20');
+    assert.equal(svg.attributes['aria-hidden'], 'true');
+    assert.equal(svg.attributes.focusable, 'false');
+    assert.match(svg.style.cssText, /width:20px;height:20px;flex:none/);
+    assert.ok(svg.firstChild.attributes.d);
+  }
   buttons[0].click(false);
   buttons[1].click(false);
   await tick();

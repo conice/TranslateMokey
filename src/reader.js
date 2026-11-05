@@ -1,4 +1,4 @@
-import { serviceEndpoint, validateSettings } from './core.js';
+import { serviceEndpoint, validateSettings, translationAppearance } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
 
 export function createReader({ document, queue, key, onStatus }) {
@@ -136,25 +136,35 @@ export function createReader({ document, queue, key, onStatus }) {
     record.state = 'waiting';
     dispatch(record, true, true);
   }
+  function paragraphButton(label, pathData) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    button.style.cssText = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;width:44px;height:44px;min-width:44px;min-height:44px;padding:12px;border:0;background:transparent;color:inherit;cursor:pointer';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    for (const [name, value] of Object.entries({ viewBox: '0 0 24 24', width: '20', height: '20', fill: 'none', stroke: 'currentColor',
+      'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) svg.setAttribute(name, value);
+    svg.style.cssText = 'display:block;width:20px;height:20px;flex:none';
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathData);
+    svg.append(path);
+    button.append(svg);
+    return button;
+  }
   function addControls(record) {
     if (record.control) return;
     const control = document.createElement('span');
     control.dataset.tmControl = '';
     control.style.cssText = 'display:block;margin:0.25em 0;font:12px/1.4 system-ui;opacity:0.7';
     const shadow = control.attachShadow({ mode: 'closed' });
-    const translateButton = document.createElement('button');
-    translateButton.type = 'button';
-    translateButton.textContent = '翻译本段';
-    translateButton.style.cssText = 'min-height:44px;margin-right:0.4em';
+    const translateButton = paragraphButton('翻译本段', 'M3 5h12M9 3v2M12 5c-1 5-4 8-9 10M5 8c1 3 4 5 7 6M13 21l4-10 4 10M14.5 17h5');
     translateButton.addEventListener('click', (event) => {
       if (!event.isTrusted) return;
       if (record.state === 'failed') record.state = 'waiting';
       dispatch(record, true);
     });
-    const retryButton = document.createElement('button');
-    retryButton.type = 'button';
-    retryButton.textContent = '重新翻译';
-    retryButton.style.cssText = 'min-height:44px';
+    const retryButton = paragraphButton('重新翻译', 'M20 7V3m0 4h-4M20 7a8 8 0 1 0 1 8');
     retryButton.addEventListener('click', (event) => { if (event.isTrusted) retranslate(record); });
     shadow.append(translateButton, retryButton);
     record.block.append(control);
@@ -201,9 +211,7 @@ export function createReader({ document, queue, key, onStatus }) {
     });
   }
   function styleTranslation(text) {
-    const color = config.translationColor === 'accent' ? '#17684a'
-      : config.translationColor === 'muted' ? '#666' : 'inherit';
-    text.style.cssText = `display:block;font:${config.translationFontSize}em/${config.translationLineHeight} system-ui;white-space:pre-wrap;overflow-wrap:anywhere;padding:0.35em 0;color:${color};opacity:0.85`;
+    text.style.cssText = translationAppearance(config);
   }
   function scheduleScan() {
     if (!enabled || paused) return;
@@ -324,7 +332,8 @@ export function createReader({ document, queue, key, onStatus }) {
       if (!enabled) return;
       const next = validateSettings(settings);
       config = { ...config, translationFontSize: next.translationFontSize,
-        translationLineHeight: next.translationLineHeight, translationColor: next.translationColor };
+        translationLineHeight: next.translationLineHeight, translationColor: next.translationColor,
+        translationSpacing: next.translationSpacing };
       mutatePage(() => {
         for (const record of blocks.values()) if (record.translationText) styleTranslation(record.translationText);
       });

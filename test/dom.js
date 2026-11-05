@@ -70,6 +70,11 @@ export function createDOM() {
   const document = {
     body, documentElement: { lang: 'en' },
     createElement: (tag) => new Node(tag),
+    createElementNS: (namespace, tag) => {
+      const node = new Node(tag);
+      node.namespaceURI = namespace;
+      return node;
+    },
     createTextNode: (text) => new Node('#text', text),
     createTreeWalker(root, type, filter) {
       scans.push(root);
