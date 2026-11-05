@@ -312,6 +312,11 @@ test('词条编辑保存词形、多义项，并能交换默认义项', async ()
   const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
   app.values.set(key, { version: 1, value: entry });
   await app.click('生词本');
+  const summaryRow = app.nodes.find((node) => node.className === 'word-summary');
+  assert.deepEqual(summaryRow.children.map((node) => [node.tag, node.textContent]),
+    [['strong', 'run'], ['span', '跑'], ['span', '词条详情与管理']]);
+  assert.equal(summaryRow.parentElement.tag, 'summary');
+  assert.equal(summaryRow.parentElement.parentElement.open, undefined);
   await app.click('编辑');
   app.nodes.find((node) => node.textContent === '原形（手动确认；留空不关联）').children[0].value = 'run';
   app.nodes.find((node) => node.textContent === '关联词形（每行一个，最多 20 个；区分大小写）').children[0].value = 'running\nran';
@@ -606,6 +611,7 @@ test('查询来源、原文动作与结果动作按对象分组，空结果与�
   await app.click('译');
   assert.ok(resultActions.children.every((node) => !node.disabled));
   assert.equal(originalActions.children[0].disabled, false);
+  assert.equal(resultActions.children[1].children[0].getAttribute('fill'), 'none');
   assert.equal(empty.className, 'result-text');
   await app.click('词典');
   assert.ok(resultActions.children.every((node) => node.disabled));
@@ -615,6 +621,21 @@ test('查询来源、原文动作与结果动作按对象分组，空结果与�
   assert.match(css, /\.query-result-header \{[^}]*flex-wrap:wrap/);
   assert.match(css, /button\.primary\.icon-button \{ padding:10px;/);
   assert.equal(app.requests.length, 1);
+});
+
+test('AI 查询结果已在生词本时收藏图标显示实心星', async () => {
+  const app = translationApp({ hideFeePopup: true });
+  const entry = { term: 'robust', source: 'auto', target: 'zh-cn', meaning: '强健的', createdAt: '2026-01-01T00:00:00.000Z' };
+  const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
+  app.values.set(key, { version: 1, value: entry });
+  await app.select('robust');
+  await app.click('翻译选区');
+  const save = app.nodes.find((node) => node.getAttribute('aria-label') === '收藏当前结果');
+  assert.equal(save.children[0].getAttribute('fill'), 'currentColor');
+  await app.click('编辑释义');
+  app.nodes.find((node) => node.textContent === '译文 / 收藏释义（可编辑）').children[0].value = '健壮的';
+  await app.click('完成编辑');
+  assert.equal(save.children[0].getAttribute('fill'), 'currentColor');
 });
 
 test('自定义 JSON 词典展示纯文本并可独立收藏；输入改变清除旧结果', async () => {
@@ -1091,9 +1112,9 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.scriptVersion, '0.4.3');
+  assert.equal(data.scriptVersion, '0.4.4');
   assert.equal(data.scriptVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
-  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.3\b/);
+  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.4\b/);
   assert.equal(data.build, 'unified-query');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);

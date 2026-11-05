@@ -92,7 +92,17 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     #tm-page-review .word { padding:32px 0; text-align:center; }
     #tm-page-review .word>strong { font-size:24px; }
     #tm-page-review .row { justify-content:center; }
-    .word-details { font-size:13px; } .word-details summary { color:var(--muted); }
+    .word-details { margin:0; font-size:13px; }
+    .word-details>summary { min-height:44px; padding:0; color:var(--ink); list-style:none; }
+    .word-details>summary::-webkit-details-marker { display:none; }
+    .word-details>summary::marker { content:''; }
+    .word-summary { display:flex; align-items:baseline; gap:8px; min-height:44px; padding:12px 0; }
+    .word-summary>.word-term { flex:0 1 auto; min-width:0; max-width:45%; overflow:hidden; text-overflow:ellipsis;
+      white-space:nowrap; font-size:18px; line-height:1.3; font-weight:600; }
+    .word-summary>.word-meaning { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .word-summary>.word-detail-label { flex:none; color:var(--muted); white-space:nowrap; }
+    .word-detail-label::before { content:'▸'; display:inline-block; margin-inline-end:4px; transition:transform .15s; }
+    .word-details[open] .word-detail-label::before { transform:rotate(90deg); }
     .empty { padding:24px 0; color:var(--muted); }
     .reading-tools { margin-top:24px; }
     .help-dialog { width:420px; max-width:calc(100vw - 32px); max-height:calc(100vh - 32px); max-height:calc(100dvh - 32px);
@@ -194,11 +204,12 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       stop: 'M6 6h12v12H6z', retry: 'M20 7V3m0 4h-4M20 7a8 8 0 1 0 1 8',
       edit: 'M14 5l5 5M4 20l5-1L21 7l-5-5L4 14z', done: 'M4 12l5 5L20 6',
       star: 'M12 3l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z',
+      starFilled: 'M12 3l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z',
       speak: 'M3 9h4l5-5v16l-5-5H3zM16 8a6 6 0 0 1 0 8M19 4a11 11 0 0 1 0 16',
       pause: 'M7 4v16M17 4v16', play: 'M6 3l15 9-15 9z', restore: 'M4 9V3m0 6h6M4 9a8 8 0 1 1-1 6',
     };
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', width: '20', height: '20', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) svg.setAttribute(key, value);
+    for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', width: '20', height: '20', fill: icon === 'starFilled' ? 'currentColor' : 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) svg.setAttribute(key, value);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', paths[icon]);
     svg.append(path);
@@ -611,6 +622,14 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     const entry = queryMode === 'ai' ? translated : dictionaryEntry;
     if (entry) { entry.meaning = meaning.value; entry.example = example.value; }
   }
+  function currentResultSaved(entry) {
+    if (!entry) return false;
+    const source = (queryMode === 'ai' ? entry.source : dictionarySource.value.trim()).toLowerCase();
+    const target = (queryMode === 'ai' ? entry.target : dictionaryTarget.value.trim()).toLowerCase();
+    if (!source || !target) return false;
+    const id = entryId({ term: entry.term, source, target });
+    return store.entries().some((item) => entryId(item) === id);
+  }
   function renderQuery() {
     const entry = queryMode === 'ai' ? translated : dictionaryEntry;
     aiMode.setAttribute('aria-pressed', String(queryMode === 'ai'));
@@ -632,6 +651,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     editQuery.disabled = saveResult.disabled = !entry;
     speakButton.disabled = !original.value.trim() || original.value.trim().length > 200;
     setIcon(editQuery, queryEditing ? 'done' : 'edit', queryEditing ? '完成编辑' : '编辑释义');
+    setIcon(saveResult, currentResultSaved(entry) ? 'starFilled' : 'star', '收藏当前结果');
     updateQueryAction();
   }
   function setQueryMode(mode, editing = false) {
@@ -723,6 +743,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       if (!duplicate) store.saveEntry({ ...existing, senses: [...senses, { meaning: entry.meaning, example: entry.example }] }, true);
     }
     refreshAnnotations();
+    renderQuery();
     report('已收藏。标注仅使用本地释义，不请求 API。');
   }
   for (const input of [original, source, target]) input.addEventListener('input', invalidateQuery);
@@ -821,9 +842,13 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     list.replaceChildren(element('p', `共 ${entries.length} 条，匹配 ${visible.length} 条（最多展示 100 条，请搜索缩小范围）`));
     for (const entry of visible.slice(0, 100)) {
       const item = element('article', '', 'word');
-      item.append(element('strong', entry.term), element('p', entry.meaning));
       const details = element('details', '', 'word-details');
-      details.append(element('summary', '词条详情与管理'));
+      const summary = element('summary');
+      const summaryRow = element('span', '', 'word-summary');
+      summaryRow.append(element('strong', entry.term, 'word-term'), element('span', entry.meaning, 'word-meaning'),
+        element('span', '词条详情与管理', 'word-detail-label'));
+      summary.append(summaryRow);
+      details.append(summary);
       details.append(element('p', `${entry.source} → ${entry.target} · ${entry.createdAt}`, 'hint'));
       if (entry.example) details.append(element('p', `例句：${entry.example}`));
       if (entry.note) details.append(element('p', `备注：${entry.note}`));
@@ -1206,7 +1231,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.3',
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.4',
       build: 'unified-query', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
