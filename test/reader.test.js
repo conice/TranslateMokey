@@ -193,6 +193,27 @@ test('仅译文可即时切回双语，保留原始链接、文本身份和事�
   assert.equal(clicks, 1);
 });
 
+test('修改外观立即更新已有译文，后续译文沿用且不重新请求', async (context) => {
+  const app = fixture(context);
+  const first = app.add('First');
+  const second = app.add('Second', 900);
+  app.reader.start(DEFAULT_SETTINGS);
+  await tick();
+  app.tasks[0].resolve('第一');
+  await tick();
+  const note = first.querySelector('[data-tm-translation]');
+  app.reader.updateAppearance({ ...DEFAULT_SETTINGS, translationFontSize: 0.85, translationLineHeight: 2.1 });
+  assert.equal(first.querySelector('[data-tm-translation]'), note);
+  assert.match(note.label.style.cssText, /0.85em\/2.1/);
+  assert.equal(app.tasks.length, 1);
+  app.enter(second);
+  await tick();
+  app.tasks[1].resolve('第二');
+  await tick();
+  assert.match(second.querySelector('[data-tm-translation]').label.style.cssText, /0.85em\/2.1/);
+  assert.equal(app.tasks.length, 2);
+});
+
 test('仅译文下原文变化重新翻译；恢复不复活网站已删除的节点', async (context) => {
   const app = fixture(context);
   const block = app.add('first');

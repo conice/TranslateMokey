@@ -183,9 +183,8 @@ export function createReader({ document, queue, key, onStatus }) {
         const shadow = note.attachShadow({ mode: 'closed' });
         const text = document.createElement('span');
         text.textContent = result;
-        const color = config.translationColor === 'accent' ? '#17684a'
-          : config.translationColor === 'muted' ? '#666' : 'inherit';
-        text.style.cssText = `display:block;font:${config.translationFontSize}em/${config.translationLineHeight} system-ui;white-space:pre-wrap;overflow-wrap:anywhere;padding:0.35em 0;color:${color};opacity:0.85`;
+        styleTranslation(text);
+        record.translationText = text;
         shadow.append(text);
         record.note = note;
         if (record.control?.before) record.control.before(note); else record.block.append(note);
@@ -200,6 +199,11 @@ export function createReader({ document, queue, key, onStatus }) {
         status(); scheduleScan();
       }
     });
+  }
+  function styleTranslation(text) {
+    const color = config.translationColor === 'accent' ? '#17684a'
+      : config.translationColor === 'muted' ? '#666' : 'inherit';
+    text.style.cssText = `display:block;font:${config.translationFontSize}em/${config.translationLineHeight} system-ui;white-space:pre-wrap;overflow-wrap:anywhere;padding:0.35em 0;color:${color};opacity:0.85`;
   }
   function scheduleScan() {
     if (!enabled || paused) return;
@@ -315,6 +319,16 @@ export function createReader({ document, queue, key, onStatus }) {
   }
   return {
     start, stop,
+    updateAppearance(settings) {
+      if (!enabled) return;
+      const next = validateSettings(settings);
+      config = { ...config, translationFontSize: next.translationFontSize,
+        translationLineHeight: next.translationLineHeight, translationColor: next.translationColor };
+      mutatePage(() => {
+        for (const record of blocks.values()) if (record.translationText) styleTranslation(record.translationText);
+      });
+      this.setMode(next.translationMode);
+    },
     setMode(mode) {
       if (!['bilingual', 'translation-only'].includes(mode)) throw new Error('网页阅读模式无效');
       if (!enabled) return;

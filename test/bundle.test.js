@@ -20,8 +20,12 @@ function environment() {
   const initialValues = new Map();
   const createElement = (tag) => {
     const node = {
-      tag, dataset: {}, style: {}, children: [], value: '', hidden: false,
-      setAttribute() {},
+      tag, dataset: {}, style: { setProperty(name, value) { this[name] = value; } }, children: [], value: '', hidden: false,
+      attributes: {},
+      setAttribute(name, value) { node.attributes[name] = value; },
+      getAttribute(name) { return node.attributes[name] ?? null; },
+      showModal() { node.open = true; },
+      close() { node.open = false; events.get(`${nodes.indexOf(node)}:close`)?.(); },
       focus() {},
       addEventListener(type, handler) { events.set(`${nodes.indexOf(node)}:${type}`, handler); },
       append(...children) { node.children.push(...children); for (const child of children) child.parentElement = node; },
@@ -62,6 +66,201 @@ test('打包作用域可以启动，初次安装不请求服务或保存设置',
   assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, true);
   const sendIndex = app.nodes.findIndex((node) => node.textContent === '翻译 / 重试');
   app.events.get(`${sendIndex}:click`)({ isTrusted: false });
+});
+
+test('界面导航标明当前页并关联内容，切换不自动聚焦输入框', async () => {
+  const app = translationApp();
+  const pages = app.nodes.filter((node) => node.className === 'page');
+  const nav = app.nodes.find((node) => node.tag === 'nav');
+  const panel = app.nodes.find((node) => node.className === 'panel');
+  assert.equal(pages.length, 6);
+  assert.ok(pages.every((page) => page.hidden));
+  assert.equal(panel.getAttribute('aria-modal'), null);
+  for (const page of pages) {
+    page.querySelector = () => ({ focus() { assert.fail('导航切换不应唤起软键盘'); } });
+  }
+  assert.equal(nav.children.length, 3);
+  for (const control of nav.children) {
+    await app.click(control.textContent);
+    const visible = pages.filter((page) => !page.hidden);
+    assert.equal(visible.length, 1);
+    assert.ok(control.getAttribute('aria-controls').startsWith('tm-page-'));
+    assert.equal(visible[0].children[0].tag, 'h2');
+    assert.equal(nav.children.filter((node) => node.getAttribute('aria-current') === 'page').length, 1);
+    assert.equal(control.getAttribute('aria-current'), 'page');
+  }
+  assert.equal(app.requests.length, 0);
+});
+
+test('说明按钮位于对应功能旁而非页面标题，内容按主题展示且不发送请求', async () => {
+  const app = translationApp();
+  const dialog = app.nodes.find((node) => node.className === 'help-dialog');
+  const controls = app.nodes.filter((node) => node.className === 'help-trigger');
+  assert.equal(controls.length, 14);
+  assert.equal(dialog.id, 'tm-help');
+  assert.equal(dialog.getAttribute('aria-labelledby'), 'tm-help-title');
+  for (const control of controls) {
+    const row = control.parentElement;
+    assert.equal(row.className, 'context-help');
+    assert.equal(control.textContent, 'ⓘ');
+    assert.equal(control.getAttribute('aria-haspopup'), 'dialog');
+    assert.equal(control.getAttribute('aria-controls'), dialog.id);
+    assert.match(control.getAttribute('aria-label'), /^查看.+说明$/);
+    app.events.get(`${app.nodes.indexOf(control)}:click`)({ isTrusted: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dialog.open, true);
+    assert.ok(dialog.children[1].children.length > 0);
+    assert.ok(dialog.children[1].children.every((node) => node.tag === 'p' && node.textContent.length > 0));
+    assert.equal(dialog.children[0].children[0].textContent, row.children[0].textContent);
+    await app.click('知道了');
+    assert.equal(dialog.open, false);
+  }
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('说明弹窗关闭恢复按钮焦点，Escape 不关闭主面板', async () => {
+  const app = translationApp();
+  await app.click('翻译');
+  const dialog = app.nodes.find((node) => node.className === 'help-dialog');
+  const trigger = app.nodes.find((node) => node.className === 'help-trigger');
+  const panel = app.nodes.find((node) => node.className === 'panel');
+  let restored = 0;
+  trigger.isConnected = true;
+  trigger.focus = () => { restored++; };
+  app.events.get(`${app.nodes.indexOf(trigger)}:click`)({ isTrusted: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(!dialog.open);
+  await app.click('ⓘ');
+  let prevented = false;
+  let stopped = false;
+  app.events.get(`${app.nodes.indexOf(dialog)}:keydown`)({ key: 'Escape', preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(dialog.open, false);
+  assert.equal(panel.hidden, false);
+  assert.equal(restored, 1);
+  assert.ok(prevented && stopped);
+  await app.click('ⓘ');
+  await app.click('关闭');
+  assert.equal(dialog.open, false);
+  assert.equal(panel.hidden, true);
+  assert.equal(restored, 1);
+});
+
+test('选区打开聚焦非输入容器，Escape 关闭并恢复原焦点', async () => {
+  const app = translationApp();
+  const panel = app.nodes.find((node) => node.className === 'panel');
+  const launcher = app.nodes.find((node) => node.className === 'launcher');
+  let focused = 0;
+  let restored = 0;
+  let prevented = 0;
+  let stopped = 0;
+  panel.focus = (options) => { assert.equal(options.preventScroll, true); focused++; };
+  app.context.document.activeElement = { isConnected: true, focus() { restored++; } };
+  await app.click('译');
+  assert.equal(focused, 1);
+  assert.equal(panel.tabIndex, -1);
+  assert.equal(launcher.getAttribute('aria-controls'), panel.id);
+  assert.equal(launcher.getAttribute('aria-expanded'), 'true');
+  app.events.get(`${app.nodes.indexOf(panel)}:keydown`)({ key: 'Escape', preventDefault() { prevented++; }, stopPropagation() { stopped++; } });
+  assert.equal(panel.hidden, true);
+  assert.equal(launcher.getAttribute('aria-expanded'), 'false');
+  assert.equal(restored, 1);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+  assert.equal(app.requests.length, 1);
+});
+
+test('可视视口变化为软键盘预留空间，缩放时不追随视口', () => {
+  const app = environment();
+  const listeners = new Map();
+  const viewport = { height: 800, offsetTop: 0, scale: 1, addEventListener(name, listener) { listeners.set(name, listener); } };
+  app.context.window.visualViewport = viewport;
+  app.context.window.innerHeight = 800;
+  runInNewContext(source, app.context);
+  app.menuActions.get('打开 TranslateMokey')();
+  const panel = app.nodes.find((node) => node.className === 'panel');
+  assert.equal(panel.style['--viewport-height'], '800px');
+  viewport.height = 420;
+  viewport.offsetTop = 30;
+  listeners.get('resize')();
+  assert.equal(panel.style['--viewport-height'], '420px');
+  assert.equal(panel.style['--viewport-bottom'], '350px');
+  viewport.offsetTop = 80;
+  listeners.get('scroll')();
+  assert.equal(panel.style['--viewport-bottom'], '300px');
+  viewport.scale = 2;
+  viewport.height = 200;
+  listeners.get('resize')();
+  assert.equal(panel.style['--viewport-height'], '420px');
+  viewport.scale = 1;
+  viewport.height = 800;
+  viewport.offsetTop = 0;
+  listeners.get('resize')();
+  assert.equal(panel.style['--viewport-bottom'], '0px');
+});
+
+test('样式保留不透明内容层、主题与无障碍降级，表单控件统一尺寸', () => {
+  const app = environment();
+  runInNewContext(source, app.context);
+  const css = app.nodes.find((node) => node.tag === 'style').textContent;
+  for (const feature of ['prefers-color-scheme:dark', 'prefers-reduced-transparency:reduce', 'prefers-contrast:more',
+    'forced-colors:active', 'prefers-reduced-motion:reduce', 'safe-area-inset-bottom', '100dvh']) assert.ok(css.includes(feature));
+  assert.match(css, /button,input,textarea,select \{ font:inherit/);
+  assert.match(css, /input\[type=checkbox\].*width:22px/);
+  assert.match(css, /\.chrome,\.launcher::before \{ background:var\(--surface\)/);
+  assert.match(css, /\.launcher \{[^}]*min-width:44px; min-height:44px;[^}]*background:transparent/);
+  assert.match(css, /\.launcher::before \{[^}]*inset:6px;[^}]*pointer-events:none;[^}]*background:var\(--surface\)/);
+  assert.doesNotMatch(css, /min-width:52px; min-height:52px/);
+  assert.match(css, /\.word \{[^}]*background:transparent/);
+  assert.match(css, /min-height:44px; min-width:44px/);
+  assert.match(css, /font:14px\/1.5 system-ui/);
+  assert.match(css, /h2 \{ font-size:20px/);
+  assert.match(css, /@media\(max-width:600px\) \{\s*label input,label textarea,label select \{ font-size:16px/);
+});
+
+test('浅深主题的正文、提示与主按钮配色达到 4.5:1', () => {
+  const app = environment();
+  runInNewContext(source, app.context);
+  const css = app.nodes.find((node) => node.tag === 'style').textContent;
+  function luminance(hex) {
+    const expanded = hex.length === 3 ? [...hex].map((digit) => digit + digit).join('') : hex;
+    const channels = expanded.match(/../g).map((channel) => {
+      const value = parseInt(channel, 16) / 255;
+      return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  }
+  const palettes = [...css.matchAll(/:host \{([^}]+)\}/g)].slice(0, 2);
+  assert.equal(palettes.length, 2);
+  for (const palette of palettes) {
+    const colors = Object.fromEntries([...palette[1].matchAll(/--([\w-]+):#([0-9a-f]+);/g)].map((match) => [match[1], match[2]]));
+    for (const [foreground, background] of [['ink', 'surface'], ['ink', 'card'], ['muted', 'surface'], ['muted', 'card'], ['on-accent', 'accent']]) {
+      const light = luminance(colors[foreground]);
+      const dark = luminance(colors[background]);
+      assert.ok((Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05) >= 4.5, `${foreground}/${background}`);
+    }
+  }
+});
+
+test('翻译等待状态有明确文字，取消后恢复主操作', async () => {
+  const app = environment();
+  let aborted = false;
+  app.context.window.location = { origin: 'https://example.com', hostname: 'example.com', pathname: '/' };
+  app.context.window.confirm = () => true;
+  app.context.GM_xmlhttpRequest = () => ({ abort() { aborted = true; } });
+  runInNewContext(source, app.context);
+  app.nodes.find((node) => node.tag === 'textarea').value = 'hello';
+  const send = app.nodes.find((node) => node.textContent === '翻译 / 重试');
+  app.events.get(`${app.nodes.indexOf(send)}:click`)({ isTrusted: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(send.disabled, true);
+  assert.equal(send.textContent, '翻译中…');
+  const cancel = app.nodes.find((node) => node.textContent === '取消');
+  app.events.get(`${app.nodes.indexOf(cancel)}:click`)({ isTrusted: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(aborted, true);
+  assert.equal(send.disabled, false);
+  assert.equal(send.textContent, '翻译 / 重试');
 });
 
 test('复习卡片先隐藏答案，评分持久化且不请求服务', async () => {
@@ -193,7 +392,11 @@ function translationApp(options = {}, allowConfirm = true) {
     app.documentEvents.get('pointerup')({ isTrusted: trusted, composedPath: () => [] });
     await new Promise((resolve) => setTimeout(resolve, 350));
   };
-  return { ...app, requests, confirmations, click, select, values, exclude() { excluded = true; }, failStorage() { failStorage = true; } };
+  const change = async (input, trusted = true) => {
+    app.events.get(`${app.nodes.indexOf(input)}:change`)({ isTrusted: trusted });
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  return { ...app, requests, confirmations, click, change, select, values, exclude() { excluded = true; }, failStorage() { failStorage = true; } };
 }
 
 test('词典默认微软；取消确认或禁用网站不请求，配置保存不执行 JS', async () => {
@@ -206,7 +409,7 @@ test('词典默认微软；取消确认或禁用网站不请求，配置保存�
   const mode = app.nodes.find((node) => node.textContent === '词典类型').children[0];
   mode.value = 'javascript';
   app.nodes.find((node) => node.textContent?.startsWith('词典 JS 函数体')).children[0].value = 'throw new Error("must not run")';
-  await app.click('保存词典配置');
+  await app.change(mode);
   assert.equal(app.values.has('tm:dictionary'), false);
   assert.equal(app.requests.length, 0);
   const disabled = translationApp({ siteRules: [{ host: 'example.com', mode: 'disabled', annotations: false }] });
@@ -214,6 +417,64 @@ test('词典默认微软；取消确认或禁用网站不请求，配置保存�
   await disabled.click('查询词典释义');
   assert.equal(disabled.requests.length, 0);
   assert.equal(disabled.confirmations.length, 0);
+});
+
+test('选区默认 AI 直接展示只读结果，编辑后完成与收藏使用新释义', async () => {
+  const app = translationApp({ hideFeePopup: true });
+  await app.select('robust');
+  assert.equal(app.requests.length, 0);
+  await app.click('翻译选区');
+  assert.equal(app.requests.length, 1);
+  const editor = app.nodes.find((node) => node.className === 'translation-editor');
+  const preview = app.nodes.find((node) => node.className === 'result-text' && node.textContent === '稳健的');
+  assert.equal(editor.hidden, true);
+  assert.ok(preview);
+  await app.click('编辑译文');
+  assert.equal(editor.hidden, false);
+  const meaning = app.nodes.find((node) => node.textContent === '译文 / 收藏释义（可编辑）').children[0];
+  meaning.value = '健壮的';
+  await app.click('完成编辑');
+  assert.equal(editor.hidden, true);
+  assert.equal(preview.textContent, '健壮的');
+  await app.click('收藏到生词本');
+  const saved = [...app.values.entries()].find(([key]) => key.startsWith('tm:word:'))[1].value;
+  assert.equal(saved.meaning, '健壮的');
+  assert.equal(app.requests.length, 1);
+});
+
+test('默认词典只发送词典请求，结果可编辑收藏且不调用 AI', async () => {
+  const app = translationApp({ lookupProvider: 'dictionary' });
+  app.values.set('tm:dictionary', { version: 1, value: { mode: 'json', url: 'https://dictionary.example/?q={term}', script: '' } });
+  await app.select('hello');
+  await app.click('翻译选区');
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].method, 'GET');
+  assert.equal(app.nodes.find((node) => node.id === 'tm-page-dictionary').hidden, false);
+  const editor = app.nodes.find((node) => node.className === 'dictionary-editor');
+  assert.equal(editor.hidden, true);
+  await app.click('编辑查询 / 释义');
+  assert.equal(editor.hidden, false);
+  app.nodes.find((node) => node.textContent === '词典释义（编辑后收藏）').children[0].value = '你好';
+  await app.click('完成词典编辑');
+  await app.click('收藏词典结果');
+  const saved = [...app.values.entries()].find(([key]) => key.startsWith('tm:word:'))[1].value;
+  assert.equal(saved.meaning, '你好');
+  assert.equal(app.requests.length, 1);
+});
+
+test('词典超长与拒绝确认均不回退 AI，切换来源必须显式点击', async () => {
+  const app = translationApp({ lookupProvider: 'dictionary', hideFeePopup: true });
+  await app.select('word '.repeat(50));
+  await app.click('翻译选区');
+  assert.equal(app.requests.length, 0);
+  await app.click('改用 AI 翻译');
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].method, 'POST');
+  const declined = translationApp({ lookupProvider: 'dictionary' }, false);
+  await declined.select();
+  await declined.click('翻译选区');
+  assert.equal(declined.requests.length, 0);
+  assert.equal(declined.confirmations.length, 1);
 });
 
 test('自定义 JSON 词典展示纯文本并可独立收藏；输入改变清除旧结果', async () => {
@@ -243,7 +504,7 @@ test('新协议设置保存回显，使用协议端点保存独立凭据且不�
   app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'https://example.com/v1beta';
   app.nodes.find((node) => node.textContent === '模型').children[0].value = 'test-model';
   app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0].value = '{}';
-  await app.click('保存设置');
+  await app.change(protocol);
   assert.equal(app.values.get('tm:settings').value.protocol, 'gemini');
   app.context.window.prompt = () => 'test-key';
   await app.click('设置 / 清除 API Key');
@@ -276,7 +537,7 @@ test('保存自动网站规则需额外授权，拒绝不写入，接受也不�
     const app = translationApp({}, accepted);
     const selector = app.nodes.find((node) => node.tag === 'select' && node.children.some((option) => option.textContent === '自动双语阅读'));
     selector.value = 'auto';
-    await app.click('保存设置');
+    await app.change(selector);
     assert.equal(app.confirmations.length, 1);
     assert.match(app.confirmations[0], /example\.com/);
     assert.equal(app.values.get('tm:settings').value.siteRules.length, Number(accepted));
@@ -286,17 +547,13 @@ test('保存自动网站规则需额外授权，拒绝不写入，接受也不�
 
 for (const autoTranslate of [false, true]) {
   for (const hideFeePopup of [false, true]) {
-    test(`自动翻译=${autoTranslate}、关闭弹窗=${hideFeePopup} 独立生效`, async () => {
+    test(`旧自动翻译=${autoTranslate} 不再阻止点击查询，费用确认=${!hideFeePopup}`, async () => {
       const app = translationApp({ autoTranslate, hideFeePopup });
       await app.select();
       assert.equal(app.requests.length, 0);
       assert.equal(app.confirmations.length, 0);
       assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, true);
       await app.click('翻译选区');
-      assert.equal(app.requests.length, Number(autoTranslate));
-      if (!autoTranslate) {
-        await app.click('翻译 / 重试');
-      }
       assert.equal(app.requests.length, 1);
       assert.equal(app.confirmations.length, Number(!hideFeePopup));
       await app.select();
@@ -335,20 +592,78 @@ test('自动翻译只处理入口选区，不发送手动输入的旧内容', as
   assert.ok(!app.requests[0].data.includes('previous input'));
 });
 
-test('设置开关保存且重新打开时回显；保存不会发请求', async () => {
+test('默认来源与费用开关保存回显，设置按用途折叠且保存不请求', async () => {
   const app = translationApp();
   await app.click('设置');
-  for (const title of ['自动翻译（', '关闭弹窗（']) {
+  for (const title of ['关闭弹窗（']) {
     const label = app.nodes.find((node) => node.tag === 'label' && node.textContent.startsWith(title));
     assert.equal(label.children[0].checked, false);
     label.children[0].checked = true;
+    await app.change(label.children[0]);
   }
-  await app.click('保存设置');
+  const provider = app.nodes.find((node) => node.textContent === '默认查询来源').children[0];
+  provider.value = 'dictionary';
+  await app.change(provider);
   const saved = app.values.get('tm:settings').value;
-  assert.equal(saved.autoTranslate, true);
+  assert.equal(saved.lookupProvider, 'dictionary');
   assert.equal(saved.hideFeePopup, true);
   await app.click('设置');
-  assert.equal(app.nodes.find((node) => node.tag === 'label' && node.textContent.startsWith('自动翻译（')).children[0].checked, true);
+  assert.equal(provider.value, 'dictionary');
+  const settingsPage = app.nodes.find((node) => node.id === 'tm-page-settings');
+  assert.equal(settingsPage.children.filter((node) => node.tag === 'details').length, 6);
+  assert.equal(settingsPage.children.filter((node) => node.tag === 'details' && node.open).length, 1);
+  assert.equal(app.requests.length, 0);
+});
+
+test('网页阅读从设置进入独立任务页', async () => {
+  const app = translationApp();
+  await app.click('设置');
+  const entry = app.nodes.find((node) => node.textContent === '打开网页阅读');
+  assert.ok(entry);
+  await app.click('打开网页阅读');
+  const reading = app.nodes.find((node) => node.id === 'tm-page-reading');
+  assert.equal(reading.hidden, false);
+  assert.equal(reading.children[0].textContent, '网页阅读');
+  assert.equal(app.nodes.find((node) => node.textContent === '返回设置').tag, 'button');
+  assert.equal(app.requests.length, 0);
+});
+
+test('字号自动保存并立即应用，坏的服务草稿不阻止独立设置保存', async () => {
+  const app = translationApp();
+  const font = app.nodes.find((node) => node.textContent === '译文字号').children[0];
+  const extra = app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0];
+  extra.value = '{';
+  await app.change(extra);
+  assert.ok(app.nodes.some((node) => node.textContent?.startsWith('未保存：附加参数')));
+  font.value = '0.85';
+  await app.change(font, false);
+  assert.equal(app.values.get('tm:settings').value.translationFontSize, 1);
+  await app.change(font);
+  assert.equal(app.values.get('tm:settings').value.translationFontSize, 0.85);
+  const panel = app.nodes.find((node) => node.className === 'panel');
+  assert.equal(panel.style['--translation-scale'], '0.85');
+  await app.click('设置');
+  assert.equal(font.value, '0.85');
+  assert.equal(app.requests.length, 0);
+  assert.ok(!app.nodes.some((node) => node.tag === 'button' && node.textContent === '保存设置'));
+  app.failStorage();
+  font.value = '1.3';
+  await app.change(font);
+  assert.equal(app.values.get('tm:settings').value.translationFontSize, 0.85);
+  assert.equal(panel.style['--translation-scale'], '0.85');
+  assert.ok(app.nodes.some((node) => node.textContent?.startsWith('未保存：')));
+});
+
+test('已授权自动阅读网站调整字号不重复授权、不发起请求', async () => {
+  const app = translationApp();
+  const mode = app.nodes.find((node) => node.tag === 'select' && node.children.some((option) => option.value === 'disabled'));
+  mode.value = 'auto';
+  await app.change(mode);
+  assert.equal(app.confirmations.length, 1);
+  const font = app.nodes.find((node) => node.textContent === '译文字号').children[0];
+  font.value = '0.85';
+  await app.change(font);
+  assert.equal(app.confirmations.length, 1);
   assert.equal(app.requests.length, 0);
 });
 
@@ -364,7 +679,7 @@ test('关闭面板后焦点仍在浮动按钮时，后续手机选区仍能打�
   await app.click('翻译选区');
   assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, false);
   assert.equal(app.nodes.find((node) => node.tag === 'textarea').value, 'new selection');
-  assert.equal(app.requests.length, 0);
+  assert.equal(app.requests.length, 2);
 });
 
 test('按下选区入口后系统清空选区，点击仍带入原词且不唤起输入框焦点', async () => {
@@ -378,7 +693,7 @@ test('按下选区入口后系统清空选区，点击仍带入原词且不唤�
   await app.click('译');
   assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, false);
   assert.equal(original.value, 'robust');
-  assert.equal(app.requests.length, 0);
+  assert.equal(app.requests.length, 1);
 });
 
 test('手机入口没有 click 时，pointerup 也能打开选区翻译面板', async () => {
@@ -426,8 +741,10 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.scriptVersion, '0.3.0');
-  assert.equal(data.build, 'dictionary-protocols');
+  assert.equal(data.scriptVersion, '0.4.0');
+  assert.equal(data.scriptVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
+  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.0\b/);
+  assert.equal(data.build, 'minimal-ui-autosave');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);
   for (const event of ['ready', 'selection-read', 'input-capture', 'button-click', 'panel-open', 'translation-request', 'translation-success', 'export-layout']) {

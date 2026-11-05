@@ -61,6 +61,14 @@ test('旧设置缺失新开关时默认关闭，拒绝非布尔值', () => {
   }
 });
 
+test('默认查询来源兼容旧设置且拒绝未知来源', () => {
+  const legacy = { ...DEFAULT_SETTINGS };
+  delete legacy.lookupProvider;
+  assert.equal(validateSettings(legacy).lookupProvider, 'ai');
+  assert.equal(validateSettings({ ...legacy, lookupProvider: 'dictionary' }).lookupProvider, 'dictionary');
+  assert.throws(() => validateSettings({ ...legacy, lookupProvider: 'remote' }));
+});
+
 test('Index 预设与 URL 规范化', () => {
   assert.equal(INDEX_PRESET.model, 'index-mt-9b');
   assert.equal(completionEndpoint(INDEX_PRESET.endpoint), 'https://index-translate.bilibili.com/v1/chat/completions');
