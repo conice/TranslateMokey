@@ -1,0 +1,18 @@
+// ==UserScript==
+// @name         TranslateMokey
+// @namespace    TranslateMokey
+// @version      0.1.1
+// @description  划词翻译、生词本与本地词后释义；可选划词自动翻译与费用提示开关
+// @match        https://*/*
+// @match        http://*/*
+// @run-at       document-idle
+// @noframes
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_listValues
+// @grant        GM_addValueChangeListener
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      index-translate.bilibili.com
+// @connect      *
+// ==/UserScript==
