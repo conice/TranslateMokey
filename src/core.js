@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   ...INDEX_PRESET,
   protocol: 'openai',
   lookupProvider: 'ai',
+  launcherAction: 'translate',
   source: 'auto',
   target: 'zh-CN',
   annotations: false,
@@ -74,6 +75,8 @@ export function validateSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('设置格式无效');
   const lookupProvider = value.lookupProvider ?? 'ai';
   if (!['ai', 'dictionary'].includes(lookupProvider)) throw new Error('默认查询来源必须是 AI 或词典');
+  const launcherAction = value.launcherAction ?? 'translate';
+  if (!['translate', 'reading', 'words', 'review', 'menu'].includes(launcherAction)) throw new Error('右下角按钮功能无效');
   const protocol = value.protocol ?? 'openai';
   serviceEndpoint({ ...value, protocol });
   const extra = value.extra;
@@ -133,7 +136,7 @@ export function validateSettings(value) {
   });
   if (new Set(siteRules.map((rule) => rule.host)).size !== siteRules.length) throw new Error('网站规则重复');
   return {
-    protocol, lookupProvider, endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
+    protocol, lookupProvider, launcherAction, endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
     source: language(value.source, true), target: language(value.target),
     extra: JSON.parse(JSON.stringify(extra)), annotations: value.annotations,
     autoTranslate: value.autoTranslate ?? false, hideFeePopup: value.hideFeePopup ?? false,

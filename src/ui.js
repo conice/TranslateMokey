@@ -22,7 +22,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     :host { --surface:#fff; --card:#f5f5f7; --ink:#1d1d1f; --muted:#626267; --line:#d2d2d7;
       --accent:#0066cc; --on-accent:#fff; --shadow:0 16px 64px #0002; }
     * { box-sizing:border-box; } [hidden] { display:none!important; }
-    .panel,.launcher,.help-dialog { color-scheme:light; font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,sans-serif; color:var(--ink); text-align:start; }
+    .panel,.launcher,.help-dialog,.launcher-menu { color-scheme:light; font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,sans-serif; color:var(--ink); text-align:start; }
     button,input,textarea,select { font:inherit; color:inherit; border:0; border-radius:0; padding:10px 12px; }
     button { cursor:pointer; min-height:44px; min-width:44px; max-width:100%; background:transparent; overflow-wrap:anywhere; }
     button:not(.primary):not(.launcher) { color:var(--accent); }
@@ -40,7 +40,13 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       pointer-events:auto; isolation:isolate; border-radius:999px; min-width:44px; min-height:44px; padding:10px 14px; font-weight:600; background:transparent; }
     .launcher::before { content:''; position:absolute; inset:6px; z-index:-1; pointer-events:none;
       border-radius:999px; background:var(--surface); box-shadow:0 2px 8px #0002; }
-    .launcher[aria-expanded=true] { visibility:hidden; }
+    .launcher[aria-expanded=true][aria-controls=tm-panel] { visibility:hidden; }
+    .launcher-menu { position:fixed; right:calc(16px + env(safe-area-inset-right,0px));
+      bottom:calc(76px + env(safe-area-inset-bottom,0px)); width:180px; max-width:calc(100vw - 32px);
+      max-height:calc(100dvh - 96px - env(safe-area-inset-bottom,0px) - env(safe-area-inset-top,0px));
+      overflow:auto; overscroll-behavior:contain; pointer-events:auto; padding:8px; border:1px solid var(--line);
+      border-radius:16px; background:var(--surface); box-shadow:var(--shadow); }
+    .launcher-menu button { display:block; width:100%; text-align:start; }
     .panel { position:fixed; right:calc(16px + env(safe-area-inset-right,0px));
       bottom:calc(var(--viewport-bottom,0px) + 16px + env(safe-area-inset-bottom,0px)); width:500px;
       max-width:calc(100vw - 32px - env(safe-area-inset-left,0px) - env(safe-area-inset-right,0px));
@@ -103,7 +109,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     @media(prefers-color-scheme:dark) {
       :host { --surface:#1d1d1f; --card:#29292c; --ink:#f5f5f7; --muted:#b5b5bc; --line:#515155;
         --accent:#8ac4ff; --on-accent:#102338; --shadow:0 16px 64px #0008; }
-      .panel,.launcher,.help-dialog { color-scheme:dark; }
+      .panel,.launcher,.help-dialog,.launcher-menu { color-scheme:dark; }
     }
     @media(prefers-reduced-transparency:reduce), (prefers-contrast:more) {
       .chrome,.launcher::before { background:var(--surface); }
@@ -235,13 +241,27 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     const text = currentSelection || selectionSnapshot || selectionText;
     selectionSnapshot = '';
     clearTimeout(selectionTimer);
-    const provider = store.settings().lookupProvider;
+    const config = store.settings();
+    if (!text && config.launcherAction === 'menu') {
+      if (!launcherMenu.hidden) closeLauncherMenu(true);
+      else {
+        launcherMenu.hidden = false;
+        launcher.setAttribute('aria-controls', launcherMenu.id);
+        launcher.setAttribute('aria-expanded', 'true');
+        launcherMenu.children[0].focus();
+      }
+      return;
+    }
+    if (!text && config.launcherAction !== 'translate') {
+      open(config.launcherAction, false);
+      return;
+    }
     if (text) {
       selectionText = text;
       original.value = text;
       invalidateQuery();
     }
-    setQueryMode(provider);
+    setQueryMode(config.lookupProvider);
     open('translate', false);
     if (text) startQuery().catch(report);
     if (!text) { original.focus(); }
@@ -273,7 +293,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     Promise.resolve().then(() => activateLauncher('pointerup')).catch(report);
   });
   launcher.className = 'launcher';
-  launcher.setAttribute('aria-label', '打开 TranslateMokey，可手动输入翻译');
+  launcher.setAttribute('aria-label', '打开 TranslateMokey，选中文字时查询选区');
   launcher.setAttribute('aria-expanded', 'false');
   launcher.setAttribute('aria-controls', 'tm-panel');
   const panel = element('section', '', 'panel');
@@ -314,6 +334,33 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     const heading = element('h2', title, 'page-title');
     pages.get(name).append(heading);
   }
+  const launcherMenu = element('section', '', 'launcher-menu');
+  launcherMenu.id = 'tm-launcher-menu';
+  launcherMenu.hidden = true;
+  launcherMenu.setAttribute('role', 'group');
+  launcherMenu.setAttribute('aria-label', '快捷菜单');
+  for (const [name, title] of [['translate', '文本查询'], ['reading', '网页翻译'], ['words', '生词本'], ['review', '复习'], ['settings', '设置']]) {
+    launcherMenu.append(button(title, () => {
+      if (name === 'translate') setQueryMode(store.settings().lookupProvider);
+      open(name, false);
+    }));
+  }
+  function closeLauncherMenu(restoreFocus = false) {
+    launcherMenu.hidden = true;
+    launcher.setAttribute('aria-controls', 'tm-panel');
+    launcher.setAttribute('aria-expanded', String(!panel.hidden));
+    if (restoreFocus) launcher.focus();
+  }
+  root.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !launcherMenu.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeLauncherMenu(true);
+    }
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!launcherMenu.hidden && !event.composedPath?.().includes(host) && event.target !== host) closeLauncherMenu();
+  });
   const helpDialog = element('dialog', '', 'help-dialog');
   helpDialog.id = 'tm-help';
   helpDialog.setAttribute('aria-labelledby', 'tm-help-title');
@@ -364,7 +411,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   queryNav.hidden = true;
   learningNav.hidden = true;
   panel.append(chrome, queryNav, learningNav, ...pages.values(), status);
-  root.append(launcher, panel, helpDialog);
+  root.append(launcher, launcherMenu, panel, helpDialog);
   document.documentElement.append(host);
 
   function updateViewport() {
@@ -428,6 +475,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
   }
   function open(name, focusInput = true) {
+    const menuWasOpen = !launcherMenu.hidden;
+    closeLauncherMenu();
     saveQueryDraft();
     if (name === 'dictionary') {
       setQueryMode('dictionary');
@@ -435,7 +484,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     if (helpDialog.open) helpDialog.close();
     const wasHidden = panel.hidden;
-    if (wasHidden) previousFocus = root.activeElement || document.activeElement;
+    if (wasHidden) previousFocus = menuWasOpen ? launcher : root.activeElement || document.activeElement;
     panel.hidden = false;
     updateViewport();
     launcher.setAttribute('aria-expanded', 'true');
@@ -961,6 +1010,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   saveStatus.setAttribute('role', 'status');
   settingsRoot.append(saveStatus);
   let settingsPage = group(settingsRoot, '默认查询与语言', true);
+  const launcherInput = choice('右下角“译”按钮功能', [['translate', '文本查询'], ['reading', '网页翻译'], ['words', '生词本'], ['review', '复习'], ['menu', '快捷菜单']]);
+  settingsPage.append(element('p', '有选中文字时优先查询选区；无选区时打开所选功能。网页翻译仅打开页面，不直接发送正文。', 'hint'));
   const providerInput = choice('默认查询来源', [['ai', 'AI 翻译'], ['dictionary', '词典']]);
   help(settingsPage, '选区查询', '选中文字本身不联网；点击选区入口后按默认来源查询并展示结果。AI 沿用费用确认设置，词典每次单独确认。词典失败或超过 200 字符时不会自动转发给 AI。');
   const defaultSource = field(settingsPage, '默认源语言', false, 35);
@@ -1051,7 +1102,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.1',
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.2',
       build: 'unified-query', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
@@ -1108,7 +1159,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     const draft = { protocol: protocolInput.value, endpoint: endpointInput.value, model: modelInput.value, extra,
       source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
-      lookupProvider: providerInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
+      lookupProvider: providerInput.value, launcherAction: launcherInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
       annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
       translationStyle: 'muted', translationMode: translationModeInput.value,
       translationFontSize: Number(translationFontSizeInput.value), translationLineHeight: Number(translationLineHeightInput.value),
@@ -1153,7 +1204,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     catch (error) { saveStatus.textContent = `未保存：${error.message}；请修正后重试。`; report(error); }
   }
   for (const [input, section] of [
-    [providerInput, 'lookupProvider'], [defaultSource, 'source'], [defaultTarget, 'target'],
+    [launcherInput, 'launcherAction'], [providerInput, 'lookupProvider'], [defaultSource, 'source'], [defaultTarget, 'target'],
     [protocolInput, 'service'], [endpointInput, 'service'], [modelInput, 'service'], [extraInput, 'service'],
     [popupInput, 'hideFeePopup'], [annotationInput, 'annotations'], [frequencyInput, 'annotationFrequency'],
     [annotationStyleInput, 'annotationStyle'], [translationModeInput, 'translationMode'],
@@ -1194,6 +1245,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     defaultTarget.value = settings.target;
     annotationInput.checked = settings.annotations;
     providerInput.value = settings.lookupProvider;
+    launcherInput.value = settings.launcherAction;
     popupInput.checked = settings.hideFeePopup;
     frequencyInput.value = settings.annotationFrequency;
     annotationStyleInput.value = settings.annotationStyle;

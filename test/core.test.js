@@ -76,6 +76,18 @@ test('Index 预设与 URL 规范化', () => {
   assert.equal(validateSettings(DEFAULT_SETTINGS).target, 'zh-cn');
 });
 
+test('悬浮按钮功能兼容旧设置并限制为已支持的入口', () => {
+  const legacy = { ...DEFAULT_SETTINGS };
+  delete legacy.launcherAction;
+  assert.equal(validateSettings(legacy).launcherAction, 'translate');
+  for (const launcherAction of ['translate', 'reading', 'words', 'review', 'menu']) {
+    assert.equal(validateSettings({ ...legacy, launcherAction }).launcherAction, launcherAction);
+  }
+  for (const launcherAction of ['settings', 'unknown', false, 1, {}]) {
+    assert.throws(() => validateSettings({ ...legacy, launcherAction }), /按钮功能/);
+  }
+});
+
 test('拒绝不安全地址与未知参数，不允许覆盖 messages 或凭据', () => {
   for (const endpoint of ['http://example.com', 'https://user:secret@example.com', 'https://example.com?key=secret', 'https://example.com/#secret', 'invalid']) {
     assert.throws(() => completionEndpoint(endpoint));

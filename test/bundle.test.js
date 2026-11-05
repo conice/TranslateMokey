@@ -770,6 +770,99 @@ test('网页阅读归属查询，设置入口仍可进入同一任务页', async
   assert.equal(app.requests.length, 0);
 });
 
+test('悬浮按钮功能独立自动保存、回显并在下次点击生效', async () => {
+  const app = translationApp();
+  await app.select('');
+  await app.click('设置');
+  const input = app.nodes.find((node) => node.textContent === '右下角“译”按钮功能').children[0];
+  assert.equal(input.value, 'translate');
+  app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'invalid';
+  input.value = 'reading';
+  await app.change(input, false);
+  assert.equal(app.values.get('tm:settings').value.launcherAction, 'translate');
+  await app.change(input);
+  assert.equal(app.values.get('tm:settings').value.launcherAction, 'reading');
+  await app.click('设置');
+  assert.equal(input.value, 'reading');
+  await app.click('关闭');
+  await app.click('译');
+  assert.equal(app.nodes.find((node) => node.id === 'tm-page-reading').hidden, false);
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('无选区按设置直达页面，有选区始终优先查询', async () => {
+  for (const launcherAction of ['translate', 'reading', 'words', 'review', 'menu']) {
+    const app = translationApp({ launcherAction, hideFeePopup: true });
+    await app.select('');
+    await app.click('译');
+    if (launcherAction === 'menu') {
+      assert.equal(app.nodes.find((node) => node.id === 'tm-launcher-menu').hidden, false);
+    } else {
+      assert.equal(app.nodes.find((node) => node.id === `tm-page-${launcherAction}`).hidden, false);
+      await app.click('关闭');
+    }
+    assert.equal(app.requests.length, 0);
+    assert.equal(app.confirmations.length, 0);
+    await app.select('selected word');
+    await app.click('翻译选区');
+    assert.equal(app.nodes.find((node) => node.id === 'tm-page-translate').hidden, false);
+    assert.equal(app.nodes.find((node) => node.id === 'tm-launcher-menu').hidden, true);
+    assert.equal(app.requests.length, 1);
+    assert.ok(app.requests[0].data.includes('selected word'));
+  }
+});
+
+test('快捷菜单固定五个入口，跳转不请求并关闭菜单', async () => {
+  const app = translationApp({ launcherAction: 'menu' });
+  await app.select('');
+  const menu = app.nodes.find((node) => node.id === 'tm-launcher-menu');
+  const launcher = app.nodes.find((node) => node.className === 'launcher');
+  assert.deepEqual(menu.children.map((node) => node.textContent), ['文本查询', '网页翻译', '生词本', '复习', '设置']);
+  for (const [index, page] of ['translate', 'reading', 'words', 'review', 'settings'].entries()) {
+    await app.click('译');
+    assert.equal(menu.hidden, false);
+    assert.equal(launcher.getAttribute('aria-controls'), menu.id);
+    assert.equal(launcher.getAttribute('aria-expanded'), 'true');
+    app.events.get(`${app.nodes.indexOf(menu.children[index])}:click`)({ isTrusted: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(menu.hidden, true);
+    assert.equal(app.nodes.find((node) => node.id === `tm-page-${page}`).hidden, false);
+    assert.equal(launcher.getAttribute('aria-controls'), 'tm-panel');
+    await app.click('关闭');
+  }
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('快捷菜单支持再次点击、外部点击和 Escape 收起，触摸不会重复切换', async () => {
+  const app = translationApp({ launcherAction: 'menu' });
+  await app.select('');
+  const menu = app.nodes.find((node) => node.id === 'tm-launcher-menu');
+  const launcher = app.nodes.find((node) => node.className === 'launcher');
+  await app.click('译');
+  await app.click('译');
+  assert.equal(menu.hidden, true);
+  await app.click('译');
+  app.documentEvents.get('pointerdown')({ composedPath: () => [] });
+  assert.equal(menu.hidden, true);
+  await app.click('译');
+  let focused = false;
+  launcher.focus = () => { focused = true; };
+  const root = app.nodes.find((node) => node.tag === 'shadow');
+  app.events.get(`${app.nodes.indexOf(root)}:keydown`)({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.equal(menu.hidden, true);
+  assert.equal(focused, true);
+  assert.equal(launcher.getAttribute('aria-expanded'), 'false');
+  const touch = { isTrusted: true, pointerType: 'touch', pointerId: 1, clientX: 20, clientY: 20 };
+  app.events.get(`${app.nodes.indexOf(launcher)}:pointerdown`)(touch);
+  app.events.get(`${app.nodes.indexOf(launcher)}:pointerup`)(touch);
+  await app.click('译');
+  assert.equal(menu.hidden, false);
+  assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, true);
+  assert.equal(app.requests.length, 0);
+});
+
 test('字号自动保存并立即应用，坏的服务草稿不阻止独立设置保存', async () => {
   const app = translationApp();
   const font = app.nodes.find((node) => node.textContent === '译文字号').children[0];
@@ -883,9 +976,9 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.scriptVersion, '0.4.1');
+  assert.equal(data.scriptVersion, '0.4.2');
   assert.equal(data.scriptVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
-  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.1\b/);
+  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.2\b/);
   assert.equal(data.build, 'unified-query');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);
