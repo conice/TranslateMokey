@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TranslateMokey
 // @namespace    TranslateMokey
-// @version      0.4.0
+// @version      0.4.1
 // @description  多协议网页翻译、自定义词典与本地发音、词形与多义项生词本及间隔复习
 // @match        https://*/*
 // @match        http://*/*

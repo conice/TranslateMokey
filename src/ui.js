@@ -68,9 +68,20 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     .field-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
     .result-text { white-space:pre-wrap; overflow-wrap:anywhere; }
     .result-actions { margin:20px 0 8px; }
+    .query-sources { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+    .query-sources button { border-radius:999px; font-size:13px; }
+    .query-sources button[aria-pressed=true] { color:var(--ink)!important; background:var(--card); font-weight:650; text-decoration:underline; text-underline-offset:5px; }
+    .query-toolbar,.query-result-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .query-toolbar { justify-content:flex-end; margin:8px 0 24px; }
+    .query-result-header { display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; justify-content:space-between; border-top:1px solid var(--line); padding-top:12px; }
+    .query-result-source { color:var(--muted); font-size:13px; font-weight:500; overflow-wrap:anywhere; }
+    .query-result-actions { margin-inline-start:auto; }
+    .icon-button { display:inline-flex; align-items:center; justify-content:center; padding:10px; border-radius:999px; }
+    button.primary.icon-button { padding:10px; }
+    .icon-button svg { flex:none; }
+    .icon-button[aria-label] { text-decoration:none!important; }
     .word>strong { display:block; font-size:18px; line-height:1.3; font-weight:600; }
-    #tm-page-translate .result-text:first-of-type { color:var(--muted); font-size:13px; }
-    #tm-page-translate .result-text:last-of-type,#tm-page-dictionary .word p { font-size:calc(16px * var(--translation-scale,1)); line-height:var(--translation-leading,1.7); }
+    #tm-page-translate .result-text { font-size:calc(16px * var(--translation-scale,1)); line-height:var(--translation-leading,1.7); }
     #tm-page-review .word { padding:32px 0; text-align:center; }
     #tm-page-review .word>strong { font-size:24px; }
     #tm-page-review .row { justify-content:center; }
@@ -165,6 +176,29 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     });
     return node;
   }
+  function iconButton(icon, label, action, className = '') {
+    const node = button('', action, `${className} icon-button`.trim());
+    setIcon(node, icon, label);
+    return node;
+  }
+  function setIcon(node, icon, label) {
+    const paths = {
+      search: 'M21 21l-6-6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
+      stop: 'M6 6h12v12H6z', retry: 'M20 7V3m0 4h-4M20 7a8 8 0 1 0 1 8',
+      edit: 'M14 5l5 5M4 20l5-1L21 7l-5-5L4 14z', done: 'M4 12l5 5L20 6',
+      star: 'M12 3l3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z',
+      speak: 'M3 9h4l5-5v16l-5-5H3zM16 8a6 6 0 0 1 0 8M19 4a11 11 0 0 1 0 16',
+      pause: 'M7 4v16M17 4v16', play: 'M6 3l15 9-15 9z', restore: 'M4 9V3m0 6h6M4 9a8 8 0 1 1-1 6',
+    };
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', width: '20', height: '20', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' })) svg.setAttribute(key, value);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', paths[icon]);
+    svg.append(path);
+    node.replaceChildren(svg);
+    node.setAttribute('aria-label', label);
+    node.title = label;
+  }
   function field(parent, title, multiline = false, maxLength = 200) {
     const label = element('label', title);
     const input = element(multiline ? 'textarea' : 'input');
@@ -178,6 +212,10 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   let activeTask;
   let serial = 0;
   let translated;
+  let queryMode = settings.lookupProvider;
+  let queryEditing = false;
+  let queryFailed = false;
+  const queryMessages = { ai: '输入文本或选择网页文字开始查询。', dictionary: '输入词语后查询词典（最多 200 字符）。' };
   let previousFocus;
   let selectionText = '';
   let selectionTimer;
@@ -198,25 +236,15 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     selectionSnapshot = '';
     clearTimeout(selectionTimer);
     const provider = store.settings().lookupProvider;
-    open(text && provider === 'dictionary' ? 'dictionary' : 'translate', false);
     if (text) {
-      cancel();
-      cancelDictionary();
       selectionText = text;
       original.value = text;
-      translated = undefined;
-      meaning.value = '';
-      example.value = '';
-      if (provider === 'dictionary') {
-        dictionaryTerm.value = text;
-        setDictionaryEditing(false);
-        queryDictionary().catch(report);
-      } else {
-        setTranslationEditing(false);
-        startTranslation().catch(report);
-      }
+      invalidateQuery();
     }
-    if (!text) { setTranslationEditing(true); original.focus(); }
+    setQueryMode(provider);
+    open('translate', false);
+    if (text) startQuery().catch(report);
+    if (!text) { original.focus(); }
   }
   const launcher = button('译', () => activateLauncher('click'));
   launcher.addEventListener('pointerdown', (event) => {
@@ -267,18 +295,18 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   learningNav.setAttribute('aria-label', '学习内容');
   const mainNavigation = new Map();
   for (const [name, title] of [['translate', '查询'], ['words', '学习'], ['settings', '设置']]) {
-    const control = button(title, () => open(name === 'translate' && store.settings().lookupProvider === 'dictionary' ? 'dictionary' : name, false));
+    const control = button(title, () => open(name, false));
     control.setAttribute('aria-controls', `tm-page-${name}`);
     control.setAttribute('aria-current', 'false');
     mainNavigation.set(name, control);
     nav.append(control);
   }
-  for (const [name, title] of [['translate', '翻译'], ['dictionary', '词典 / 发音'], ['reading', '网页阅读'], ['words', '生词本'], ['review', '复习'], ['settings', '设置']]) {
+  for (const [name, title] of [['translate', '文本'], ['reading', '网页'], ['words', '生词本'], ['review', '复习'], ['settings', '设置']]) {
     const control = button(title, () => open(name, false));
     control.setAttribute('aria-controls', `tm-page-${name}`);
     control.setAttribute('aria-current', 'false');
     navigation.set(name, control);
-    if (name === 'translate' || name === 'dictionary') queryNav.append(control);
+    if (name === 'translate' || name === 'reading') queryNav.append(control);
     if (name === 'words' || name === 'review') learningNav.append(control);
     pages.set(name, element('section', '', 'page'));
     pages.get(name).id = `tm-page-${name}`;
@@ -354,17 +382,18 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     serial += 1;
     activeTask?.cancel();
     activeTask = undefined;
-    send.disabled = false;
-    send.textContent = '翻译 / 重试';
+    updateQueryAction();
     log('translation-cancel');
   }
   function close() {
     clearTimeout(selectionTimer);
     selectionGesture = false;
     selectionSnapshot = '';
+    saveQueryDraft();
+    if (activeTask || dictionaryTask) queryMessages[queryMode] = '已取消，可重新查询。';
     cancel();
-    cancelDictionary();
-    speech.stop();
+    cancelDictionary(false);
+    stopSpeech();
     panel.hidden = true;
     if (helpDialog.open) helpDialog.close();
     launcher.setAttribute('aria-expanded', 'false');
@@ -399,6 +428,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
   }
   function open(name, focusInput = true) {
+    saveQueryDraft();
+    if (name === 'dictionary') {
+      setQueryMode('dictionary');
+      name = 'translate';
+    }
     if (helpDialog.open) helpDialog.close();
     const wasHidden = panel.hidden;
     if (wasHidden) previousFocus = root.activeElement || document.activeElement;
@@ -409,7 +443,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       page.hidden = key !== name;
       navigation.get(key).setAttribute('aria-current', key === name ? 'page' : 'false');
     }
-    const category = ['translate', 'dictionary'].includes(name) ? 'translate' : ['words', 'review'].includes(name) ? 'words' : 'settings';
+    const category = ['translate', 'reading'].includes(name) ? 'translate' : ['words', 'review'].includes(name) ? 'words' : 'settings';
     for (const [key, control] of mainNavigation) {
       control.setAttribute('aria-current', key === category ? 'page' : 'false');
       if (key === category) control.setAttribute('aria-controls', `tm-page-${name}`);
@@ -420,8 +454,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (name === 'words') renderWords();
     if (name === 'review') renderReview();
     if (name === 'settings') loadSettings();
-    if (focusInput && name === 'translate') setTranslationEditing(true);
-    if (focusInput && name === 'dictionary') setDictionaryEditing(true);
+    if (name === 'reading') updateReadingControls();
+    if (name === 'translate') setQueryMode(queryMode, focusInput);
     const focusable = pages.get(name).querySelector('input,textarea,select,button:not(.help-trigger)');
     if (focusInput) focusable?.focus();
     else if (wasHidden) panel.focus({ preventScroll: true });
@@ -445,28 +479,152 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   });
 
   const translationPage = pages.get('translate');
+  const querySources = element('div', '', 'query-sources');
+  querySources.setAttribute('role', 'group');
+  querySources.setAttribute('aria-label', '查询来源');
+  const aiMode = button('AI', () => setQueryMode('ai'));
+  const dictionaryModeButton = button('词典', () => setQueryMode('dictionary'));
+  querySources.append(aiMode, dictionaryModeButton);
+  translationPage.append(querySources);
+  const original = field(translationPage, '原文（选区或手动粘贴，上限 10000 字符）', true, 10000);
+  const toolbar = element('div', '', 'query-toolbar');
+  toolbar.setAttribute('role', 'group');
+  toolbar.setAttribute('aria-label', '原文操作');
+  const send = iconButton('search', '查询', () => {
+    if (activeTask || dictionaryTask) {
+      cancel();
+      cancelDictionary(false);
+      queryMessages[queryMode] = '已取消，可重新查询。';
+      renderQuery();
+      return;
+    }
+    return startQuery();
+  }, 'primary');
+  const speakButton = iconButton('speak', '播放本地发音', () => {
+    if (speaking) { stopSpeech(); return; }
+    speech.speak(original.value, queryMode === 'ai' && source.value !== 'auto' ? source.value : speechLanguage.value, (message) => {
+      speaking = message.startsWith('本地发音：');
+      setIcon(speakButton, speaking ? 'stop' : 'speak', speaking ? '停止发音' : '播放本地发音');
+      report(message);
+    });
+  });
+  let speaking = false;
+  function stopSpeech() {
+    speech.stop();
+    speaking = false;
+    setIcon(speakButton, 'speak', '播放本地发音');
+  }
+  const editQuery = iconButton('edit', '编辑释义', () => {
+    if (queryEditing) saveQueryDraft();
+    queryEditing = !queryEditing;
+    renderQuery();
+    if (queryEditing) meaning.focus();
+    else panel.focus({ preventScroll: true });
+  });
+  toolbar.append(speakButton, send);
+  translationPage.append(toolbar);
+  const resultHeader = element('div', '', 'query-result-header');
+  const resultSource = element('span', 'AI 翻译', 'query-result-source');
+  const resultActions = element('div', '', 'query-result-actions');
+  resultActions.setAttribute('role', 'group');
+  resultActions.setAttribute('aria-label', '结果操作');
+  const saveResult = iconButton('star', '收藏当前结果', saveQueryEntry);
+  resultActions.append(editQuery, saveResult);
+  resultHeader.append(resultSource, resultActions);
+  translationPage.append(resultHeader);
   const translationResult = element('article', '', 'word');
-  const originalPreview = element('p', '', 'result-text');
+  translationResult.setAttribute('aria-live', 'polite');
   const meaningPreview = element('p', '输入文本或选择网页文字开始查询。', 'result-text');
-  translationResult.append(element('strong', 'AI 翻译'), originalPreview, meaningPreview);
+  const phoneticPreview = element('p', '', 'hint');
+  const examplePreview = element('p', '', 'result-text');
+  translationResult.append(phoneticPreview, meaningPreview, examplePreview);
   translationPage.append(translationResult);
   const translationEditor = element('div', '', 'translation-editor');
   translationPage.append(translationEditor);
-  help(translationEditor, '发送范围', '仅发送此处文本，不自动发送上下文或整页。自动源语言由服务判断，不展示未经核实的识别标签。');
-  const original = field(translationEditor, '原文（选区或手动粘贴，上限 10000 字符）', true, 10000);
-  const source = field(translationEditor, '源语言（auto 或语言代码）', false, 35);
-  const target = field(translationEditor, '目标语言代码', false, 35);
+  const meaning = field(translationEditor, '译文 / 收藏释义（可编辑）', true, 20000);
+  const example = field(translationEditor, '例句（可选，仅本地保存）', true, 2000);
+  const languageOptions = group(translationPage, '语言与查询说明');
+  const aiOptions = element('div');
+  languageOptions.append(aiOptions);
+  help(aiOptions, '发送范围', '仅发送此处文本，不自动发送上下文或整页。自动源语言由服务判断，不展示未经核实的识别标签。');
+  const source = field(aiOptions, '源语言（auto 或语言代码）', false, 35);
+  const target = field(aiOptions, '目标语言代码', false, 35);
   source.value = siteSettings(settings, window.location?.hostname).source;
   target.value = siteSettings(settings, window.location?.hostname).target;
-  const actions = element('div', '', 'row');
-  const send = button('翻译 / 重试', startTranslation, 'primary');
+  function updateQueryAction() {
+    const busy = Boolean(activeTask || dictionaryTask);
+    setIcon(send, busy ? 'stop' : queryFailed ? 'retry' : 'search', busy ? '取消查询' : queryFailed ? '重试查询' : '查询');
+    send.setAttribute('aria-busy', String(busy));
+  }
+  function saveQueryDraft() {
+    if (!queryEditing) return;
+    const entry = queryMode === 'ai' ? translated : dictionaryEntry;
+    if (entry) { entry.meaning = meaning.value; entry.example = example.value; }
+  }
+  function renderQuery() {
+    const entry = queryMode === 'ai' ? translated : dictionaryEntry;
+    aiMode.setAttribute('aria-pressed', String(queryMode === 'ai'));
+    dictionaryModeButton.setAttribute('aria-pressed', String(queryMode === 'dictionary'));
+    aiOptions.hidden = queryMode !== 'ai';
+    dictionaryOptions.hidden = queryMode !== 'dictionary';
+    resultSource.textContent = queryMode === 'ai' ? 'AI 翻译' : dictionaryEntry?.provider || '词典';
+    phoneticPreview.textContent = entry?.phonetic || '';
+    meaningPreview.textContent = entry?.meaning || queryMessages[queryMode];
+    examplePreview.textContent = entry?.example || '';
+    phoneticPreview.hidden = !entry?.phonetic;
+    examplePreview.hidden = !entry?.example;
+    meaningPreview.className = entry ? 'result-text' : 'hint';
+    meaning.value = entry?.meaning || '';
+    meaning.maxLength = queryMode === 'ai' ? 20000 : 2000;
+    example.value = entry?.example || '';
+    translationEditor.hidden = !queryEditing;
+    translationResult.hidden = queryEditing;
+    editQuery.disabled = saveResult.disabled = !entry;
+    speakButton.disabled = !original.value.trim() || original.value.trim().length > 200;
+    setIcon(editQuery, queryEditing ? 'done' : 'edit', queryEditing ? '完成编辑' : '编辑释义');
+    updateQueryAction();
+  }
+  function setQueryMode(mode, editing = false) {
+    saveQueryDraft();
+    if (mode !== queryMode) {
+      if (activeTask || dictionaryTask) queryMessages[queryMode] = '已取消，可重新查询。';
+      cancel();
+      cancelDictionary(false);
+      stopSpeech();
+    }
+    queryMode = mode;
+    queryEditing = editing && Boolean(mode === 'ai' ? translated : dictionaryEntry);
+    queryFailed = false;
+    renderQuery();
+  }
+  function invalidateQuery() {
+    cancel();
+    cancelDictionary();
+    stopSpeech();
+    translated = undefined;
+    queryEditing = false;
+    queryFailed = false;
+    queryMessages.ai = queryMessages.dictionary = '原文或语言已修改，请重新查询。';
+    renderQuery();
+  }
+  async function startQuery() {
+    saveQueryDraft();
+    queryEditing = false;
+    queryFailed = false;
+    try { await (queryMode === 'ai' ? startTranslation() : queryDictionary()); }
+    catch (error) {
+      queryFailed = true;
+      queryMessages[queryMode] = error.message;
+      renderQuery();
+      report(error);
+    }
+  }
   async function startTranslation() {
     log('translation-start');
     cancel();
     translated = undefined;
-    meaning.value = '';
-    originalPreview.textContent = original.value;
-    meaningPreview.textContent = '等待查询确认…';
+    queryMessages.ai = '等待查询确认…';
+    renderQuery();
     const config = validateSettings({ ...store.settings(), source: source.value.trim(), target: target.value.trim() });
     if (sitePolicy(config, window.location?.hostname).mode === 'disabled') throw new Error('此网站已禁用翻译');
     const text = original.value.trim();
@@ -475,88 +633,55 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     const endpoint = serviceEndpoint(config);
     if (!config.hideFeePopup && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} 发送输入框中的 ${text.length} 字符。不会发送整页。可能产生服务费用。\n是否继续？`)) {
       log('translation-confirm-cancel', { length: text.length });
-      meaningPreview.textContent = '已取消。可点击“翻译 / 重试”重新查询。';
+      queryMessages.ai = '已取消，可重新查询。';
+      renderQuery();
       return;
     }
     const current = serial;
     const context = { title: document.title.slice(0, 500), url: window.location.origin + window.location.pathname };
     activeTask = queue.enqueue(config, store.key(endpoint), text, true);
     log('translation-request', { length: text.length, source: config.source, target: config.target, hiddenFeePopup: config.hideFeePopup });
-    send.disabled = true;
-    send.textContent = '翻译中…';
-    meaningPreview.textContent = '翻译中…';
-    setTranslationEditing(false);
+    queryMessages.ai = '翻译中…';
+    renderQuery();
     report(`翻译中… 接收方：${endpoint}；模型：${config.model}；${text.length} 字符，可能产生服务费用。`);
     try {
       const result = await activeTask.promise;
       if (serial !== current) return;
-      meaning.value = result;
-      translated = { term: text, source: config.source, target: config.target, ...context };
-      meaningPreview.textContent = result;
+      translated = { term: text, meaning: result, example: '', source: config.source, target: config.target, ...context };
       report('翻译完成。');
       log('translation-success');
     } catch (error) {
-      if (serial === current) { meaningPreview.textContent = '翻译失败，可重试或编辑原文。'; report(error); }
+      if (serial === current) { queryFailed = true; queryMessages.ai = '翻译失败，可重试或编辑原文。'; report(error); }
     } finally {
-      if (serial === current) { activeTask = undefined; send.disabled = false; send.textContent = '翻译 / 重试'; }
+      if (serial === current) { activeTask = undefined; renderQuery(); }
     }
   }
-  actions.append(send, button('取消', () => { cancel(); meaningPreview.textContent = '已取消'; report('已取消'); }));
-  const translationTools = element('details');
-  translationTools.append(element('summary', '切换来源 / 发音'));
-  translationTools.append(button('用词典查询', () => {
-    cancel();
-    cancelDictionary();
-    dictionaryTerm.value = original.value;
-    if (source.value !== 'auto') speechLanguage.value = source.value;
-    open('dictionary', false);
-    setDictionaryEditing(false);
-    return queryDictionary();
-  }), button('朗读原文', () => speech.speak(original.value, source.value === 'auto' ? speechLanguage.value : source.value, report)));
-  translationPage.append(actions);
-  const meaning = field(translationEditor, '译文 / 收藏释义（可编辑）', true, 20000);
-  const example = field(translationEditor, '例句（可选，仅本地保存）', true, 2000);
-  const editingActions = element('div', '', 'row result-actions');
-  editingActions.append(button('编辑译文', () => { cancel(); setTranslationEditing(true); meaning.focus(); }),
-    button('完成编辑', () => { setTranslationEditing(false); panel.focus({ preventScroll: true }); }));
-  translationPage.append(editingActions);
-  function setTranslationEditing(editing) {
-    translationEditor.hidden = !editing;
-    translationResult.hidden = editing;
-    editingActions.children[0].hidden = editing;
-    editingActions.children[1].hidden = !editing;
-    originalPreview.textContent = original.value;
-    if (meaning.value) meaningPreview.textContent = meaning.value;
-  }
-  translationPage.append(button('收藏到生词本', () => {
-    if (!translated) throw new Error('请先完成翻译');
-    if (original.value.trim() !== translated.term || source.value.trim().toLowerCase() !== translated.source
-      || target.value.trim().toLowerCase() !== translated.target) throw new Error('原文或语言已变化，请重新翻译后收藏');
-    const entry = { ...translated, meaning: meaning.value, example: example.value, note: '', createdAt: new Date().toISOString() };
+  function saveQueryEntry() {
+    saveQueryDraft();
+    const result = queryMode === 'ai' ? translated : dictionaryEntry;
+    if (!result || result.term !== original.value.trim()) throw new Error('请先完成当前来源查询');
+    if (queryMode === 'ai' && (source.value.trim().toLowerCase() !== result.source
+      || target.value.trim().toLowerCase() !== result.target)) throw new Error('原文或语言已变化，请重新查询后收藏');
+    const entry = queryMode === 'ai' ? { ...result, note: '', createdAt: new Date().toISOString() }
+      : { term: result.term, meaning: result.meaning, example: result.example, source: dictionarySource.value.trim(), target: dictionaryTarget.value.trim(),
+        note: `来源：${result.provider}${result.phonetic ? `；${result.phonetic}` : ''}`, title: result.provider, url: result.url, createdAt: new Date().toISOString() };
     if (!store.saveEntry(entry)) {
       if (!window.confirm('已存在相同原词和语言的词条，是否补充为其他义项？默认释义与复习记录保持不变。')) return;
-      const existing = store.entries().find((item) => entryId(item) === entryId(entry));
+      const existing = store.entries().find((item) => entryId(item) === entryId({ ...entry, source: entry.source.toLowerCase(), target: entry.target.toLowerCase() }));
       const senses = existing.senses ?? [];
       const duplicate = [existing, ...senses].some((sense) => sense.meaning === entry.meaning.trim() && sense.example === entry.example.trim());
       if (!duplicate) store.saveEntry({ ...existing, senses: [...senses, { meaning: entry.meaning, example: entry.example }] }, true);
     }
     refreshAnnotations();
     report('已收藏。标注仅使用本地释义，不请求 API。');
-  }));
-  translationPage.append(translationTools);
-  for (const input of [original, source, target]) input.addEventListener('input', () => {
-    cancel();
-    translated = undefined;
-    meaning.value = '';
-    meaningPreview.textContent = '原文或语言已修改，请重新翻译。';
-  });
-  setTranslationEditing(false);
+  }
+  for (const input of [original, source, target]) input.addEventListener('input', invalidateQuery);
 
   const readingPage = pages.get('reading');
   const readingStatus = element('p', '尚未开启网页翻译', 'status');
   readingStatus.setAttribute('role', 'status');
   const reader = createReader({ document, queue, key: (endpoint) => store.key(endpoint),
-    onStatus: (message) => { readingStatus.textContent = message; } });
+    onStatus: (message) => { readingStatus.textContent = message; updateReadingControls(); } });
   function startReading(automatic = false, paragraphsOnly = false) {
     const config = siteSettings(store.settings(), window.location?.hostname);
     const policy = sitePolicy(config, window.location?.hostname);
@@ -564,21 +689,37 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     const endpoint = serviceEndpoint(config);
     if (!automatic && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} ${paragraphsOnly ? '发送你点击翻译按钮的段落正文' : '持续发送当前可见正文、滚动后出现及动态加载的正文'}，可能产生多次请求和费用。不发送 URL、输入框或代码。\n是否开启网页阅读？`)) return;
     reader.start(config, { automatic: !paragraphsOnly });
+    updateReadingControls();
   }
   help(readingPage, '网页发送范围', '按设置选择双语或仅译文模式；仅发送进入可见区域的正文，动态内容继续处理。网页阅读始终单独确认，不受“关闭弹窗”影响。SPA 地址变化后停止，需重新开启。每段提供翻译和重新翻译按钮。');
   const readingStart = element('div', '', 'row');
   readingStart.append(button('开启双语阅读', () => startReading(), 'primary'), button('仅启用逐段翻译', () => startReading(false, true)));
-  const readingDisplay = element('div', '', 'row');
-  readingDisplay.append(button('切换双语显示', () => reader.setMode('bilingual')), button('切换仅译文', () => reader.setMode('translation-only')));
+  const readingDisplay = element('label', '显示方式');
+  const readingMode = element('select');
+  for (const [value, title] of [['bilingual', '双语'], ['translation-only', '仅译文']]) {
+    const option = element('option', title);
+    option.value = value;
+    readingMode.append(option);
+  }
+  readingMode.addEventListener('change', (event) => { if (event.isTrusted) reader.setMode(readingMode.value); });
+  readingDisplay.append(readingMode);
   const readingTasks = element('div', '', 'row');
-  readingTasks.append(
-    button('暂停网页翻译', () => reader.pause()),
-    button('继续网页翻译', () => reader.resume()), button('重试失败段落', () => reader.retry()),
-    button('恢复原文', () => { reader.stop(); readingStatus.textContent = '已取消网页任务并恢复原文'; }));
-  const readingOptions = group(readingPage, '显示与任务');
-  readingOptions.append(element('h3', '显示方式'), readingDisplay, element('h3', '任务控制'), readingTasks);
-  readingPage.append(element('h3', '开始阅读'), readingStart, readingStatus,
-    button('返回设置', () => open('settings', false)), readingOptions);
+  const readingPause = iconButton('pause', '暂停网页翻译', () => {
+    if (reader.state().paused) reader.resume();
+    else reader.pause();
+    updateReadingControls();
+  });
+  const readingRetry = iconButton('retry', '重试失败段落', () => { reader.retry(); updateReadingControls(); });
+  const readingRestore = iconButton('restore', '恢复原文', () => { reader.stop(); readingStatus.textContent = '已取消网页任务并恢复原文'; updateReadingControls(); });
+  function updateReadingControls() {
+    const state = reader.state();
+    readingPause.disabled = readingRetry.disabled = readingRestore.disabled = readingMode.disabled = !state.enabled;
+    setIcon(readingPause, state.paused ? 'play' : 'pause', state.paused ? '继续网页翻译' : '暂停网页翻译');
+    readingMode.value = state.mode;
+  }
+  readingTasks.append(readingPause, readingRetry, readingRestore);
+  readingPage.append(readingStart, readingStatus, readingDisplay, readingTasks);
+  updateReadingControls();
   const wordsPage = pages.get('words');
   const search = field(wordsPage, '搜索原词或释义', false, 200);
   const wordActions = element('div', '', 'row');
@@ -641,8 +782,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       details.append(element('p', entry.mastered ? '已掌握（不参与复习）' : entry.review ? `已复习 ${entry.review.count} 次 · 下次：${new Date(entry.review.dueAt).toLocaleString()}` : '未学', 'hint'));
       if (entry.title || entry.url) details.append(element('p', `${entry.title}\n${entry.url}`, 'hint'));
       details.append(button('查询词典', () => {
-        cancelDictionary();
-        dictionaryTerm.value = entry.term;
+        original.value = entry.term;
+        invalidateQuery();
         if (entry.source !== 'auto') speechLanguage.value = entry.source;
         open('dictionary');
       }), button('发音', () => speech.speak(entry.term, entry.source === 'auto' ? speechLanguage.value : entry.source, report)));
@@ -714,105 +855,57 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
   }
 
-  const dictionaryPage = pages.get('dictionary');
-  const dictionaryOutput = element('div', '', 'word');
-  dictionaryPage.append(dictionaryOutput);
-  const dictionaryEditor = element('div', '', 'dictionary-editor');
-  dictionaryPage.append(dictionaryEditor);
-  help(dictionaryEditor, '词典查询', '默认微软 Bing 英汉词典，释义通常为中文，不随翻译目标语言改变。查询会发送当前词，不发送上下文、网页地址或翻译密钥；每次查询单独确认。超过 200 字符请手动改用 AI，不会自动转发。');
-  const dictionaryTerm = field(dictionaryEditor, '查询词（最多 200 字符）', false, 200);
+  const dictionaryOptions = element('div');
+  languageOptions.append(dictionaryOptions);
+  help(dictionaryOptions, '词典查询', '默认微软 Bing 英汉词典，释义通常为中文，不随翻译目标语言改变。查询会发送当前词，不发送上下文、网页地址或翻译密钥；每次查询单独确认。超过 200 字符请手动改用 AI，不会自动转发。');
   const speechGroup = element('details');
-  speechGroup.append(element('summary', '发音与收藏语言'));
+  speechGroup.append(element('summary', '本地发音语言'));
   const speechLanguage = field(speechGroup, '发音语言（明确语言代码，不支持 auto）', false, 35);
   speechLanguage.value = 'en-US';
   help(speechGroup, '本地发音', '发音仅选浏览器报告为 localService 的语音；缺少本地语音时不会切换到远端。未确认源语言时使用这里的语言，默认 en-US，可手动修改。');
-  const dictionaryDefinition = field(dictionaryEditor, '词典释义（编辑后收藏）', true, 2000);
-  function setDictionaryEditing(editing) {
-    dictionaryEditor.hidden = !editing;
-    dictionaryOutput.hidden = editing;
-    dictionaryEdit.hidden = editing;
-    dictionaryDone.hidden = !editing;
-    if (!editing && dictionaryEntry) {
-      dictionaryEntry.meaning = dictionaryDefinition.value;
-      dictionaryOutput.replaceChildren(element('strong', `${dictionaryEntry.term} · ${dictionaryEntry.provider}`),
-        element('p', dictionaryEntry.phonetic), element('p', dictionaryEntry.meaning), element('p', dictionaryEntry.example));
-    }
-  }
-  function cancelDictionary() {
+  function cancelDictionary(clearResult = true) {
     dictionarySerial += 1;
     dictionaryTask?.cancel();
     dictionaryTask = undefined;
-    dictionaryEntry = undefined;
-    dictionaryDefinition.value = '';
-    dictionaryOutput.replaceChildren();
+    if (clearResult) dictionaryEntry = undefined;
+    updateQueryAction();
   }
-  dictionaryTerm.addEventListener('input', cancelDictionary);
   async function queryDictionary() {
     cancelDictionary();
     if (sitePolicy(store.settings(), window.location?.hostname).mode === 'disabled') throw new Error('当前网站已禁用翻译与词典请求');
     const config = store.dictionary();
-    const term = dictionaryTerm.value.trim();
+    const term = original.value.trim();
     if (!term || term.length > 200) {
-      dictionaryOutput.replaceChildren(element('p', '词典仅支持 1–200 字符，请编辑或手动改用 AI。'));
       throw new Error('词典仅支持 1–200 字符，不会自动改用 AI');
     }
-    dictionaryOutput.replaceChildren(element('strong', term), element('p', '等待词典查询确认…'));
+    queryMessages.dictionary = '等待词典查询确认…';
+    renderQuery();
     const url = dictionaryURL(config.url, term);
     if (!window.confirm(`将向 ${url}\n发送当前查询词（最多 200 字符）。${config.mode === 'javascript' ? '随后执行你保存的词典解析 JS。' : ''}不发送翻译密钥或上下文。是否查询？`)) {
-      dictionaryOutput.replaceChildren(element('p', '已取消词典查询。'));
+      queryMessages.dictionary = '已取消词典查询。';
+      renderQuery();
       return;
     }
-    setDictionaryEditing(false);
-    dictionaryOutput.replaceChildren(element('strong', term), element('p', '词典查询中…'));
+    queryMessages.dictionary = '词典查询中…';
     const current = dictionarySerial;
     const pageURL = window.location?.href;
     dictionaryTask = lookupDictionary(request, document, config, term);
+    renderQuery();
     report('词典查询中…');
     try {
       const result = await dictionaryTask.promise;
-      if (current !== dictionarySerial || term !== dictionaryTerm.value.trim() || pageURL !== window.location?.href) return;
+      if (current !== dictionarySerial || term !== original.value.trim() || pageURL !== window.location?.href) return;
       dictionaryEntry = { term, ...result, provider: config.mode === 'bing' ? '微软 Bing 词典' : '自定义词典', url };
-      dictionaryDefinition.value = result.meaning;
-      setDictionaryEditing(false);
       report('词典查询完成；结果为词典来源，不是模型解释。');
-    } catch (error) { if (current === dictionarySerial) { dictionaryOutput.replaceChildren(element('p', '词典查询失败，可重试或手动改用 AI。')); report(error); } }
-    finally { if (current === dictionarySerial) dictionaryTask = undefined; }
+    } catch (error) { if (current === dictionarySerial) { queryFailed = true; queryMessages.dictionary = '词典查询失败，可重试或手动改用 AI。'; report(error); } }
+    finally { if (current === dictionarySerial) { dictionaryTask = undefined; renderQuery(); } }
   }
-  dictionaryPage.append(button('查询词典释义', queryDictionary, 'primary'), button('取消词典查询', () => { cancelDictionary(); dictionaryOutput.replaceChildren(element('p', '已取消词典查询。')); report('词典查询已取消'); }));
-  speechGroup.append(button('播放本地发音', () => speech.speak(dictionaryTerm.value, speechLanguage.value, report)), button('停止发音', () => speech.stop()));
-  const dictionaryEdit = button('编辑查询 / 释义', () => { dictionaryTask?.cancel(); dictionarySerial += 1; setDictionaryEditing(true); dictionaryTerm.focus(); });
-  const dictionaryDone = button('完成词典编辑', () => { setDictionaryEditing(false); panel.focus({ preventScroll: true }); });
-  dictionaryPage.append(dictionaryEdit, dictionaryDone,
-    button('改用 AI 翻译', () => {
-      cancelDictionary();
-      original.value = dictionaryTerm.value;
-      example.value = '';
-      open('translate', false);
-      setTranslationEditing(false);
-      return startTranslation();
-    }));
-  const dictionarySource = field(speechGroup, '收藏源语言（请确认；未知填 auto）', false, 35);
-  const dictionaryTarget = field(speechGroup, '词典释义语言（请确认；Bing 默认 zh-CN）', false, 35);
+  const dictionarySource = field(dictionaryOptions, '收藏源语言（请确认；未知填 auto）', false, 35);
+  const dictionaryTarget = field(dictionaryOptions, '词典释义语言（请确认；Bing 默认 zh-CN）', false, 35);
   dictionarySource.value = 'auto';
   dictionaryTarget.value = 'zh-CN';
-  dictionaryPage.append(button('收藏词典结果', () => {
-    if (!dictionaryEntry || dictionaryEntry.term !== dictionaryTerm.value.trim()) throw new Error('请先完成词典查询');
-    const entry = { term: dictionaryEntry.term, meaning: dictionaryDefinition.value, example: dictionaryEntry.example,
-      source: dictionarySource.value.trim(), target: dictionaryTarget.value.trim(), note: `来源：${dictionaryEntry.provider}${dictionaryEntry.phonetic ? `；${dictionaryEntry.phonetic}` : ''}`,
-      title: dictionaryEntry.provider, url: dictionaryEntry.url, createdAt: new Date().toISOString() };
-    if (!store.saveEntry(entry)) {
-      if (!window.confirm('已有此词，是否将词典释义补充为其他义项？默认释义不变。')) return;
-      const existing = store.entries().find((item) => item.term === entry.term && item.source === entry.source.toLowerCase() && item.target === entry.target.toLowerCase());
-      const senses = existing.senses ?? [];
-      if (![existing, ...senses].some((sense) => sense.meaning === entry.meaning && sense.example === entry.example)) {
-        store.saveEntry({ ...existing, senses: [...senses, { meaning: entry.meaning, example: entry.example }] }, true);
-      }
-    }
-    refreshAnnotations();
-    report('已收藏词典释义；语言以你填写的值为准。');
-  }));
-  dictionaryPage.append(speechGroup);
-  setDictionaryEditing(true);
+  languageOptions.append(speechGroup);
+  renderQuery();
 
   const reviewPage = pages.get('review');
   help(reviewPage, '复习规则', '本地复习，不请求服务。默认义项为答案；认识按 1/3/7/14/30/90/180 天安排，模糊为 1 天，不认识为 10 分钟。已掌握词不参与，可在生词本重新加入。');
@@ -912,6 +1005,9 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       if (config.mode === 'javascript' && !window.confirm('确认保存并启用此词典 JS？仅使用你信任的代码；查询时会在隔离环境执行，浏览器安全限制可能导致不可用。')) { loadSettings(); return false; }
       store.saveDictionary(config);
       cancelDictionary();
+      queryEditing = false;
+      queryMessages.dictionary = '词典配置已变化，请重新查询。';
+      renderQuery();
       report('词典配置已保存；未发送请求，也未执行 JS。');
       return true;
   }
@@ -919,6 +1015,9 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       if (!window.confirm('确认用微软 Bing 词典替换已保存的自定义词典配置？')) return;
       store.saveDictionary(DEFAULT_DICTIONARY);
       cancelDictionary();
+      queryEditing = false;
+      queryMessages.dictionary = '词典配置已变化，请重新查询。';
+      renderQuery();
       loadSettings();
       report('已恢复微软词典；未发送请求。');
     }));
@@ -952,8 +1051,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.0',
-      build: 'minimal-ui-autosave', exportedAt: new Date().toISOString(),
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.1',
+      build: 'unified-query', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
     diagnosticGroup.open = true;
@@ -992,6 +1091,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     store.saveKey(endpoint, key);
     cancel();
     reader.stop();
+    updateReadingControls();
     queue.clearCache();
     updateKeyStatus();
     report('凭据已更新，不会加入备份。');
@@ -1025,15 +1125,16 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     settings = next;
     applyTypography();
     if (!affectsRequests) {
-      if (['translationFontSize', 'translationLineHeight', 'translationColor', 'translationMode'].includes(section)) reader.updateAppearance(next);
+      if (['translationFontSize', 'translationLineHeight', 'translationColor', 'translationMode'].includes(section)) { reader.updateAppearance(next); updateReadingControls(); }
+      if (section === 'lookupProvider') setQueryMode(next.lookupProvider);
       refreshAnnotations();
       return true;
     }
-    cancelDictionary();
-    speech.stop();
+    invalidateQuery();
     log('settings-saved', { autoTranslate: next.autoTranslate, hideFeePopup: next.hideFeePopup });
     cancel();
     reader.stop();
+    updateReadingControls();
     queue.clearCache();
     readingStatus.textContent = '设置已变化，网页阅读已停止；自动规则下次加载生效';
     translated = undefined;
@@ -1161,10 +1262,9 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   registerMenu('刷新本地生词标注', () => { try { refreshAnnotations(); } catch (error) { report(error); open('settings'); } });
   store.subscribe(() => {
     try {
-      cancelDictionary();
-      speech.stop();
-      cancel();
+      invalidateQuery();
       reader.stop();
+      updateReadingControls();
       queue.clearCache();
       readingStatus.textContent = '其他标签页数据已变化，网页阅读已停止';
       translated = undefined;
@@ -1174,7 +1274,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       report('其他标签页的数据已变化；下次翻译使用最新服务设置，语言仍以当前输入框为准。');
     } catch (error) { report(error); }
   });
-  window.addEventListener('pagehide', () => { clearTimeout(selectionTimer); selectionGesture = false; cancel(); cancelDictionary(); speech.stop(); reader.stop(); queue.clearCache(); annotator.clear(); });
+  window.addEventListener('pagehide', () => { clearTimeout(selectionTimer); selectionGesture = false; invalidateQuery(); reader.stop(); updateReadingControls(); queue.clearCache(); annotator.clear(); });
   window.addEventListener('pageshow', (event) => { if (event.persisted) refreshAnnotations(); });
   for (const page of pages.values()) page.hidden = true;
   loadSettings();

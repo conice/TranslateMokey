@@ -56,6 +56,22 @@ function fixture(context) {
   };
 }
 
+test('任务状态支持单一暂停继续按钮与显示模式同步', (context) => {
+  const app = fixture(context);
+  assert.deepEqual(app.reader.state(), { enabled: false, paused: false, mode: 'bilingual' });
+  app.reader.start(DEFAULT_SETTINGS, { automatic: false });
+  assert.equal(app.reader.state().enabled, true);
+  app.reader.pause();
+  assert.equal(app.reader.state().paused, true);
+  app.reader.resume();
+  assert.equal(app.reader.state().paused, false);
+  app.reader.setMode('translation-only');
+  assert.equal(app.reader.state().mode, 'translation-only');
+  app.reader.stop();
+  assert.equal(app.reader.state().enabled, false);
+  assert.equal(app.tasks.length, 0);
+});
+
 test('默认零请求，可见正文优先、排除私有区域和过长段落、滚动翻译及纯文本恢复', async (context) => {
   const app = fixture(context);
   const first = app.add('Hello <strong>world</strong>');

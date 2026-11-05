@@ -319,6 +319,7 @@ export function createReader({ document, queue, key, onStatus }) {
   }
   return {
     start, stop,
+    state: () => ({ enabled, paused, mode: config?.translationMode || 'bilingual' }),
     updateAppearance(settings) {
       if (!enabled) return;
       const next = validateSettings(settings);
