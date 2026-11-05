@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { translate } from '../src/service.js';
-import { DEFAULT_SETTINGS } from '../src/core.js';
+import { DEFAULT_SETTINGS, serviceEndpoint, validateSettings } from '../src/core.js';
 
 test('构造非流式请求、附加参数及隐私边界', async () => {
   let sent;
@@ -76,4 +76,49 @@ test('空文本、超长文本及相同语言不发请求', () => {
   assert.throws(() => translate(request, DEFAULT_SETTINGS, '', ' '));
   assert.throws(() => translate(request, DEFAULT_SETTINGS, '', 'a'.repeat(10001)));
   assert.throws(() => translate(request, { ...DEFAULT_SETTINGS, source: 'zh-CN' }, '', 'text'), /相同/);
+});
+
+for (const protocol of ['anthropic', 'gemini']) {
+  test(`${protocol} 原生端点、鉴权头、参数映射与多文本块解析`, async () => {
+    const config = { ...DEFAULT_SETTINGS, protocol, endpoint: 'https://example.com/v1', model: 'test-model', extra: { max_tokens: 1000, top_p: 0.8 } };
+    let sent;
+    const response = protocol === 'anthropic'
+      ? { stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: 'private' }, { type: 'text', text: '译文一' }, { type: 'text', text: '译文二' }] }
+      : { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'private', thought: true }, { text: '译文一' }, { text: '译文二' }] } }] };
+    const task = translate((options) => { sent = options; options.onload({ status: 200, responseText: JSON.stringify(response) }); }, config, 'test-key', 'word');
+    assert.equal(await task.promise, '译文一\n译文二');
+    assert.equal(sent.url, serviceEndpoint(config));
+    assert.ok(!sent.url.includes('test-key'));
+    assert.equal(sent.headers.Authorization, undefined);
+    const body = JSON.parse(sent.data);
+    if (protocol === 'anthropic') {
+      assert.equal(sent.headers['x-api-key'], 'test-key');
+      assert.equal(sent.headers['anthropic-version'], '2023-06-01');
+      assert.equal(body.max_tokens, 1000);
+      assert.match(sent.url, /\/messages$/);
+    } else {
+      assert.equal(sent.headers['x-goog-api-key'], 'test-key');
+      assert.deepEqual(body.generationConfig, { topP: 0.8, maxOutputTokens: 1000 });
+      assert.match(sent.url, /\/models\/test-model:generateContent$/);
+      assert.match(body.contents[0].parts[0].text, /word/);
+    }
+  });
+  test(`${protocol} 拒绝截断、阻止和空响应，不回显响应正文`, async () => {
+    const config = { ...DEFAULT_SETTINGS, protocol, endpoint: 'https://example.com/v1', model: 'test-model', extra: {} };
+    for (const response of [{}, { stop_reason: 'max_tokens', content: [{ type: 'text', text: 'SECRET' }] },
+      { candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'SECRET' }] } }] },
+      { candidates: [{ finishReason: 'STOP', content: { parts: [{ thought: true, text: 'SECRET' }] } }] }]) {
+      const task = translate((options) => options.onload({ status: 200, responseText: JSON.stringify(response) }), config, '', 'word');
+      await assert.rejects(task.promise, (error) => !error.message.includes('SECRET'));
+    }
+  });
+}
+
+test('旧设置默认 OpenAI；新协议拒绝旧私有参数和错误模型路径', () => {
+  const legacy = { ...DEFAULT_SETTINGS };
+  delete legacy.protocol;
+  assert.equal(validateSettings(legacy).protocol, 'openai');
+  for (const protocol of ['anthropic', 'gemini', 'unknown']) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, protocol }));
+  assert.throws(() => serviceEndpoint({ endpoint: 'https://example.com/v1', protocol: 'gemini', model: '../bad' }));
+  assert.throws(() => serviceEndpoint({ endpoint: 'https://example.com/v1/chat/completions', protocol: 'anthropic' }));
 });

@@ -95,7 +95,7 @@ test('JSON 备份无损往返，只导出白名单词条字段', () => {
 
 test('导入在写入前拒绝损坏、未知版本、重复词条及过大数据', () => {
   const valid = JSON.parse(exportBackup([sample]));
-  for (const data of [null, {}, { ...valid, version: 2 }, { ...valid, entries: [sample, sample] }, { ...valid, entries: [{ ...sample, term: '' }] }]) {
+  for (const data of [null, {}, { ...valid, version: 99 }, { ...valid, entries: [sample, sample] }, { ...valid, entries: [{ ...sample, term: '' }] }]) {
     assert.throws(() => parseBackup(JSON.stringify(data)));
   }
   assert.throws(() => parseBackup('not json'));

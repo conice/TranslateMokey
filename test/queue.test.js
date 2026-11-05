@@ -4,6 +4,24 @@ import { DEFAULT_SETTINGS } from '../src/core.js';
 import { createTranslationQueue } from '../src/queue.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test('协议切换隔离缓存，三种协议返回值分别复用', async () => {
+  let calls = 0;
+  const queue = createTranslationQueue((options) => {
+    calls += 1;
+    const data = options.url.endsWith('/messages') ? { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Claude' }] }
+      : options.url.endsWith(':generateContent') ? { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'Gemini' }] } }] }
+        : { choices: [{ message: { content: 'OpenAI' } }] };
+    options.onload({ status: 200, responseText: JSON.stringify(data) });
+    return { abort() {} };
+  });
+  for (const [protocol, expected] of [['openai', 'OpenAI'], ['anthropic', 'Claude'], ['gemini', 'Gemini']]) {
+    const config = { ...DEFAULT_SETTINGS, endpoint: 'https://example.com/v1', model: 'test-model', protocol, extra: {} };
+    assert.equal(await queue.enqueue(config, '', 'word').promise, expected);
+    assert.equal(await queue.enqueue(config, '', 'word').promise, expected);
+  }
+  assert.equal(calls, 3);
+});
 function fixture() {
   const requests = [];
   let aborts = 0;

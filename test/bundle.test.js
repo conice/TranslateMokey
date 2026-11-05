@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { DEFAULT_SETTINGS } from '../src/core.js';
 
-const modules = ['core', 'storage', 'service', 'queue', 'annotations', 'reader', 'ui', 'main'];
+const modules = ['core', 'review', 'dictionary', 'speech', 'storage', 'service', 'queue', 'annotations', 'reader', 'ui', 'main'];
 const source = `(() => { 'use strict'; ${modules.map((name) => readFileSync(new URL(`../src/${name}.js`, import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '').replace(/^export /gm, '')).join('\n')} })();`;
 
@@ -64,6 +64,84 @@ test('打包作用域可以启动，初次安装不请求服务或保存设置',
   app.events.get(`${sendIndex}:click`)({ isTrusted: false });
 });
 
+test('复习卡片先隐藏答案，评分持久化且不请求服务', async () => {
+  const app = translationApp();
+  const entry = { term: 'run', source: 'en', target: 'zh-cn', meaning: '跑', createdAt: '2026-01-01T00:00:00.000Z' };
+  const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
+  app.values.set(key, { version: 1, value: entry });
+  await app.click('复习');
+  assert.ok(app.nodes.some((node) => node.textContent === '显示答案'));
+  assert.ok(!app.nodes.some((node) => node.tag === 'button' && node.textContent === '认识'));
+  await app.click('显示答案');
+  await app.click('认识');
+  assert.equal(app.values.get(key).value.review.count, 1);
+  assert.ok(app.nodes.some((node) => node.textContent === '本轮完成 1 条。当前到期 0 条；点击刷新开始下一轮。'));
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+  await app.click('认识');
+  assert.equal(app.values.get(key).value.review.count, 1);
+});
+
+test('复习反面卡片、数量校验及写入失败保留当前进度', async () => {
+  const app = translationApp();
+  const entry = { term: 'run', source: 'en', target: 'zh-cn', meaning: '跑', createdAt: '2026-01-01T00:00:00.000Z' };
+  const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
+  app.values.set(key, { version: 1, value: entry });
+  const limit = app.nodes.find((node) => node.textContent === '每轮数量（1–100）').children[0];
+  limit.value = '0';
+  await app.click('复习');
+  assert.ok(app.nodes.some((node) => node.textContent === '每轮数量必须为 1–100 的整数'));
+  limit.value = '1';
+  app.nodes.find((node) => node.textContent === '反向卡片（看释义回忆原词）').children[0].checked = true;
+  await app.click('开始 / 刷新复习');
+  assert.ok(app.nodes.some((node) => node.tag === 'strong' && node.textContent === '跑'));
+  await app.click('显示答案');
+  app.failStorage();
+  await app.click('模糊');
+  assert.equal(app.values.get(key).value.review, undefined);
+  assert.ok(!app.nodes.some((node) => node.textContent?.startsWith('本轮完成 1 条')));
+  assert.equal(app.requests.length, 0);
+});
+
+test('词条编辑保存词形、多义项，并能交换默认义项', async () => {
+  const app = translationApp();
+  const entry = { term: 'run', source: 'en', target: 'zh-cn', meaning: '跑', example: 'run fast', createdAt: '2026-01-01T00:00:00.000Z',
+    senses: [{ meaning: '运营', example: 'run a shop' }] };
+  const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
+  app.values.set(key, { version: 1, value: entry });
+  await app.click('生词本');
+  await app.click('编辑');
+  app.nodes.find((node) => node.textContent === '原形（手动确认；留空不关联）').children[0].value = 'run';
+  app.nodes.find((node) => node.textContent === '关联词形（每行一个，最多 20 个；区分大小写）').children[0].value = 'running\nran';
+  await app.click('设为默认义项');
+  await app.click('保存修改');
+  const saved = app.values.get(key).value;
+  assert.equal(saved.meaning, '运营');
+  assert.equal(saved.example, 'run a shop');
+  assert.equal(saved.senses[0].meaning, '跑');
+  assert.equal(saved.forms.join(','), 'running,ran');
+  assert.equal(app.requests.length, 0);
+});
+
+test('重复收藏补充义项且保留默认释义和复习记录', async () => {
+  const app = translationApp({ hideFeePopup: true });
+  const entry = { term: 'robust', source: 'auto', target: 'zh-cn', meaning: '强健的', example: '', createdAt: '2026-01-01T00:00:00.000Z',
+    forms: ['Robust'], review: { count: 1, step: 0, feedback: 'known', lastAt: '2026-01-01T00:00:00.000Z', dueAt: '2026-01-02T00:00:00.000Z' } };
+  const key = `tm:word:${JSON.stringify([entry.term, entry.source, entry.target])}`;
+  app.values.set(key, { version: 1, value: entry });
+  await app.select();
+  await app.click('翻译选区');
+  await app.click('翻译 / 重试');
+  await app.click('收藏到生词本');
+  await app.click('收藏到生词本');
+  const saved = app.values.get(key).value;
+  assert.equal(saved.meaning, '强健的');
+  assert.equal(saved.senses.length, 1);
+  assert.equal(saved.senses[0].meaning, '稳健的');
+  assert.equal(saved.review.count, 1);
+  assert.equal(saved.forms[0], 'Robust');
+});
+
 test('缺少必要管理器 API 时明确报错且不挂载半成品界面', () => {
   const app = environment();
   delete app.context.GM_xmlhttpRequest;
@@ -80,13 +158,15 @@ function translationApp(options = {}, allowConfirm = true) {
   const confirmations = [];
   let failStorage = false;
   app.context.GM_getValue = (key, fallback) => values.get(key) ?? fallback;
+  app.context.GM_listValues = () => [...values.keys()];
   app.context.GM_setValue = (key, value) => {
     if (failStorage) throw new Error('storage unavailable');
     values.set(key, value);
   };
   app.context.GM_xmlhttpRequest = (request) => {
     requests.push(request);
-    request.onload({ status: 200, responseText: '{"choices":[{"message":{"content":"稳健的"}}]}' });
+    request.onload({ status: 200, responseText: request.method === 'GET'
+      ? '{"meaning":"<img onerror=alert(1)>","phonetic":"/test/"}' : '{"choices":[{"message":{"content":"稳健的"}}]}' });
     return { abort() {} };
   };
   app.context.window.location = { origin: 'https://example.com', hostname: 'example.com', pathname: '/', href: 'https://example.com/' };
@@ -115,6 +195,63 @@ function translationApp(options = {}, allowConfirm = true) {
   };
   return { ...app, requests, confirmations, click, select, values, exclude() { excluded = true; }, failStorage() { failStorage = true; } };
 }
+
+test('词典默认微软；取消确认或禁用网站不请求，配置保存不执行 JS', async () => {
+  const app = translationApp({}, false);
+  await app.click('词典 / 发音');
+  app.nodes.find((node) => node.textContent === '查询词（最多 200 字符）').children[0].value = 'hello';
+  await app.click('查询词典释义');
+  assert.equal(app.requests.length, 0);
+  assert.match(app.confirmations[0], /cn\.bing\.com/);
+  const mode = app.nodes.find((node) => node.textContent === '词典类型').children[0];
+  mode.value = 'javascript';
+  app.nodes.find((node) => node.textContent?.startsWith('词典 JS 函数体')).children[0].value = 'throw new Error("must not run")';
+  await app.click('保存词典配置');
+  assert.equal(app.values.has('tm:dictionary'), false);
+  assert.equal(app.requests.length, 0);
+  const disabled = translationApp({ siteRules: [{ host: 'example.com', mode: 'disabled', annotations: false }] });
+  disabled.nodes.find((node) => node.textContent === '查询词（最多 200 字符）').children[0].value = 'hello';
+  await disabled.click('查询词典释义');
+  assert.equal(disabled.requests.length, 0);
+  assert.equal(disabled.confirmations.length, 0);
+});
+
+test('自定义 JSON 词典展示纯文本并可独立收藏；输入改变清除旧结果', async () => {
+  const app = translationApp();
+  app.values.set('tm:dictionary', { version: 1, value: { mode: 'json', url: 'https://dictionary.example/?q={term}', script: '' } });
+  const term = app.nodes.find((node) => node.textContent === '查询词（最多 200 字符）').children[0];
+  term.value = 'word';
+  await app.click('查询词典释义');
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].headers, undefined);
+  assert.match(app.requests[0].url, /dictionary\.example/);
+  assert.ok(app.nodes.some((node) => node.tag === 'p' && node.textContent === '<img onerror=alert(1)>'));
+  await app.click('收藏词典结果');
+  const saved = [...app.values.entries()].find(([key]) => key.startsWith('tm:word:'))[1].value;
+  assert.equal(saved.meaning, '<img onerror=alert(1)>');
+  assert.equal(saved.target, 'zh-cn');
+  term.value = 'new';
+  app.events.get(`${app.nodes.indexOf(term)}:input`)();
+  await app.click('收藏词典结果');
+  assert.ok(app.nodes.some((node) => node.textContent === '请先完成词典查询'));
+});
+
+test('新协议设置保存回显，使用协议端点保存独立凭据且不请求', async () => {
+  const app = translationApp();
+  const protocol = app.nodes.find((node) => node.textContent === '翻译服务协议').children[0];
+  protocol.value = 'gemini';
+  app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'https://example.com/v1beta';
+  app.nodes.find((node) => node.textContent === '模型').children[0].value = 'test-model';
+  app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0].value = '{}';
+  await app.click('保存设置');
+  assert.equal(app.values.get('tm:settings').value.protocol, 'gemini');
+  app.context.window.prompt = () => 'test-key';
+  await app.click('设置 / 清除 API Key');
+  assert.equal(app.values.get('tm:secret:https://example.com/v1beta/models/test-model:generateContent'), 'test-key');
+  await app.click('设置');
+  assert.equal(protocol.value, 'gemini');
+  assert.equal(app.requests.length, 0);
+});
 
 test('网页阅读确认独立于费用弹窗开关，拒绝授权不请求', async () => {
   const app = translationApp({ hideFeePopup: true }, false);
@@ -289,7 +426,8 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.build, 'web-reading');
+  assert.equal(data.scriptVersion, '0.3.0');
+  assert.equal(data.build, 'dictionary-protocols');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);
   for (const event of ['ready', 'selection-read', 'input-capture', 'button-click', 'panel-open', 'translation-request', 'translation-success', 'export-layout']) {

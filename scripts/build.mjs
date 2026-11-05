@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
-const modules = ['core', 'storage', 'service', 'queue', 'annotations', 'reader', 'ui', 'main'];
+const modules = ['core', 'review', 'dictionary', 'speech', 'storage', 'service', 'queue', 'annotations', 'reader', 'ui', 'main'];
 const metadata = await readFile(new URL('src/metadata.txt', root), 'utf8');
 const sources = await Promise.all(modules.map(async (name) => {
   const source = await readFile(new URL(`src/${name}.js`, root), 'utf8');

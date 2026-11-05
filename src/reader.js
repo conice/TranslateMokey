@@ -1,4 +1,4 @@
-import { completionEndpoint, validateSettings } from './core.js';
+import { serviceEndpoint, validateSettings } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
 
 export function createReader({ document, queue, key, onStatus }) {
@@ -171,7 +171,7 @@ export function createReader({ document, queue, key, onStatus }) {
     status();
     Promise.resolve().then(() => {
       if (!valid()) return;
-      record.task = queue.enqueue(config, key(completionEndpoint(config.endpoint)), record.text, force, bypassCache);
+      record.task = queue.enqueue(config, key(serviceEndpoint(config)), record.text, force, bypassCache);
       return record.task.promise;
     }).then((result) => {
       if (!result || !valid()) return;

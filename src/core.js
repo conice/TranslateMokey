@@ -1,4 +1,5 @@
 export const SCHEMA_VERSION = 1;
+export const BACKUP_VERSION = 2;
 export const INDEX_PRESET = Object.freeze({
   endpoint: 'https://index-translate.bilibili.com/v1',
   model: 'index-mt-9b',
@@ -6,6 +7,7 @@ export const INDEX_PRESET = Object.freeze({
 });
 export const DEFAULT_SETTINGS = Object.freeze({
   ...INDEX_PRESET,
+  protocol: 'openai',
   source: 'auto',
   target: 'zh-CN',
   annotations: false,
@@ -39,9 +41,13 @@ export function language(value, allowAuto = false) {
 }
 
 export function completionEndpoint(value) {
+  return serviceEndpoint({ endpoint: value, protocol: 'openai' });
+}
+
+export function serviceEndpoint({ endpoint, protocol = 'openai', model }) {
   let url;
   try {
-    url = new URL(boundedText(value, '服务地址', 2048));
+    url = new URL(boundedText(endpoint, '服务地址', 2048));
   } catch {
     throw new Error('服务地址必须是有效的 HTTPS URL');
   }
@@ -49,17 +55,29 @@ export function completionEndpoint(value) {
     throw new Error('仅支持 HTTPS，地址中不得包含凭据、查询参数或片段');
   }
   url.pathname = url.pathname.replace(/\/+$/, '');
-  if (!url.pathname.endsWith('/chat/completions')) url.pathname += '/chat/completions';
+  if (!['openai', 'anthropic', 'gemini'].includes(protocol)) throw new Error('服务协议无效');
+  const suffix = protocol === 'openai' ? '/chat/completions' : protocol === 'anthropic' ? '/messages' : '';
+  if (protocol === 'gemini') {
+    if (typeof model !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$/.test(model)) throw new Error('Gemini 模型需填写不含路径的模型 ID');
+    if (/\/(chat\/completions|messages)$|:generateContent$/.test(url.pathname)) throw new Error('Gemini 请填写 API 基础地址，不含模型路径');
+    url.pathname += `/models/${model}:generateContent`;
+  } else {
+    if ((protocol === 'anthropic' && url.pathname.endsWith('/chat/completions'))
+      || (protocol === 'openai' && url.pathname.endsWith('/messages')) || url.pathname.endsWith(':generateContent')) throw new Error('服务地址与协议不匹配');
+    if (!url.pathname.endsWith(suffix)) url.pathname += suffix;
+  }
   return url.href;
 }
 
 export function validateSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('设置格式无效');
-  completionEndpoint(value.endpoint);
+  const protocol = value.protocol ?? 'openai';
+  serviceEndpoint({ ...value, protocol });
   const extra = value.extra;
   if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('附加参数必须是 JSON 对象');
   if (JSON.stringify(extra).length > 8000) throw new Error('附加参数过长');
-  const allowed = new Set(['temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'chat_template_kwargs']);
+  const allowed = new Set(protocol === 'openai' ? ['temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'chat_template_kwargs']
+    : ['temperature', 'top_p', 'max_tokens']);
   for (const [key, item] of Object.entries(extra)) {
     if (!allowed.has(key)) throw new Error(`不支持的附加参数：${key}`);
     if (key === 'chat_template_kwargs') {
@@ -69,7 +87,7 @@ export function validateSettings(value) {
         throw new Error('chat_template_kwargs 仅支持布尔值 enable_thinking');
       }
     } else if (typeof item !== 'number' || !Number.isFinite(item) || item < 0
-      || (key === 'temperature' && item > 2) || (key === 'top_p' && item > 1)
+      || (key === 'temperature' && item > (protocol === 'anthropic' ? 1 : 2)) || (key === 'top_p' && item > 1)
       || (key.startsWith('max_') && (!Number.isInteger(item) || item < 1))) {
       throw new Error(`附加参数 ${key} 的数值无效`);
     }
@@ -112,7 +130,7 @@ export function validateSettings(value) {
   });
   if (new Set(siteRules.map((rule) => rule.host)).size !== siteRules.length) throw new Error('网站规则重复');
   return {
-    endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
+    protocol, endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
     source: language(value.source, true), target: language(value.target),
     extra: JSON.parse(JSON.stringify(extra)), annotations: value.annotations,
     autoTranslate: value.autoTranslate ?? false, hideFeePopup: value.hideFeePopup ?? false,
@@ -148,6 +166,31 @@ export function validateEntry(value) {
     if (typeof value.mastered !== 'boolean') throw new Error('已掌握状态无效');
     entry.mastered = value.mastered;
   }
+  if (value.lemma !== undefined) entry.lemma = boundedText(value.lemma, '原形', 200, true);
+  if (value.forms !== undefined) {
+    if (!Array.isArray(value.forms) || value.forms.length > 20) throw new Error('关联词形最多 20 个');
+    entry.forms = [...new Set(value.forms.map((form) => boundedText(form, '关联词形', 200)))];
+  }
+  if (value.senses !== undefined) {
+    if (!Array.isArray(value.senses) || value.senses.length > 20) throw new Error('其他义项最多 20 个');
+    entry.senses = value.senses.map((sense) => {
+      if (!sense || typeof sense !== 'object' || Array.isArray(sense)) throw new Error('义项格式无效');
+      return { meaning: boundedText(sense.meaning, '义项释义', 2000), example: boundedText(sense.example ?? '', '义项例句', 2000, true) };
+    });
+  }
+  if (value.review !== undefined) {
+    const review = value.review;
+    if (!review || typeof review !== 'object' || Array.isArray(review)
+      || !Number.isSafeInteger(review.count) || review.count < 1
+      || !Number.isInteger(review.step) || review.step < 0 || review.step > 6
+      || !['known', 'fuzzy', 'again'].includes(review.feedback)) throw new Error('复习记录无效');
+    for (const date of [review.lastAt, review.dueAt]) {
+      if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(date)
+        || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString() !== date) throw new Error('复习时间无效');
+    }
+    if (review.dueAt <= review.lastAt) throw new Error('复习到期时间必须晚于上次复习');
+    entry.review = { count: review.count, step: review.step, feedback: review.feedback, lastAt: review.lastAt, dueAt: review.dueAt };
+  }
   if (!Number.isFinite(Date.parse(entry.createdAt))) throw new Error('收藏时间无效');
   if (entry.url) {
     let url;
@@ -168,7 +211,7 @@ export function parseBackup(text) {
   if (typeof text !== 'string' || text.length > 5 * 1024 * 1024) throw new Error('备份不得超过 5 MiB');
   let data;
   try { data = JSON.parse(text); } catch { throw new Error('备份不是有效 JSON'); }
-  if (!data || data.format !== 'TranslateMokey' || data.version !== SCHEMA_VERSION
+  if (!data || data.format !== 'TranslateMokey' || ![1, BACKUP_VERSION].includes(data.version)
     || !Array.isArray(data.entries) || data.entries.length > 5000) throw new Error('备份格式、版本或词条数量无效（上限 5000）');
   const entries = data.entries.map(validateEntry);
   if (new Set(entries.map(entryId)).size !== entries.length) throw new Error('备份内有重复词条，请先去重');
@@ -176,7 +219,7 @@ export function parseBackup(text) {
 }
 
 export function exportBackup(entries) {
-  const output = JSON.stringify({ format: 'TranslateMokey', version: SCHEMA_VERSION, entries: entries.map(validateEntry) }, null, 2);
+  const output = JSON.stringify({ format: 'TranslateMokey', version: BACKUP_VERSION, entries: entries.map(validateEntry) }, null, 2);
   if (new TextEncoder().encode(output).length > 5 * 1024 * 1024) throw new Error('备份超过 5 MiB，请先缩减词条内容；尚未导出');
   return output;
 }
@@ -188,6 +231,14 @@ export function createMatcher(entries, target, source = 'auto') {
   for (const entry of selected.sort((left, right) => Number(left.source !== 'auto') - Number(right.source !== 'auto'))) {
     meanings.set(entry.term, entry);
   }
+  const aliases = new Map();
+  for (const entry of selected) {
+    for (const form of new Set([entry.lemma, ...(entry.forms ?? [])].filter(Boolean))) {
+      if (meanings.has(form)) continue;
+      aliases.set(form, aliases.has(form) && aliases.get(form) !== entry ? null : entry);
+    }
+  }
+  for (const [form, entry] of aliases) if (entry) meanings.set(form, entry);
   const terms = [...meanings.keys()].sort((left, right) => right.length - left.length);
   if (!terms.length) return () => [];
   const pattern = new RegExp(terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gu');

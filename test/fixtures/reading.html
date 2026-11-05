@@ -10,6 +10,7 @@
   <h1>TranslateMokey 手动验收页面</h1>
   <p>This robust design uses art, not partial matches. Robust is case-sensitive.</p>
   <p>robust design should win over robust when both are saved.</p>
+  <p>run, running and ran: manual word forms. Running stays case-sensitive.</p>
   <p><a href="#result" id="link">A robust link</a> must keep its click behavior.</p>
   <p>跨标签短语不匹配：<strong>robust</strong> design.</p>
   <pre>robust code must not be annotated</pre>
@@ -39,6 +40,18 @@
       <li>隐私：输入框、编辑区、代码、隐藏与 translate="no" 内容不得出现在请求中。需在网络面板核对。</li>
       <li>长页与移动端：滚动到页尾，译文不重叠；暂停、继续、SPA 路由后停止并恢复。</li>
       <li>标注：四次设置分别检查每次/每页/每段首次，后释义/展开/下划线/高亮；已掌握词按隐藏/淡化显示。</li>
+    </ol>
+    <h2>第三阶段首批手动验收</h2>
+    <ol>
+      <li>给 run 添加原形与 running/ran 关联词形、其他义项；保存后检查标注使用默认释义，交换默认义项后即时更新。</li>
+      <li>另建 running 精确词条时优先使用其释义；两个词条都关联 ran 时跳过歧义词形。关闭标注恢复原文。</li>
+      <li>复习正反面、显示答案、三档反馈、已掌握排除与重新加入；确认不产生网络请求，刷新页面后记录仍在。</li>
+      <li>导入旧备份、导出新备份后在独立测试环境导入，核对词形、义项、次数与到期时间；已有重复词条应跳过。</li>
+      <li>另一标签编辑或删除当前卡片，再评分不得复活词条；检查窄屏按钮、长义项与键盘焦点。</li>
+      <li>词典：默认微软、取消确认零请求、Bing 释义/音标、JSON 与 JS 解析结果、独立收藏；修改输入或关闭后旧结果不得出现。</li>
+      <li>JS 隔离：验证 fetch/importScripts 外部地址失败，document/GM 不可用；无限循环两秒后停止；站点 CSP 阻止时明确报错，不回退页面执行。</li>
+      <li>发音：本地英语与其他语言、无语音包、停止、关闭面板；检查网络面板没有 TTS 请求。原文为 auto 时手动确认发音语言。</li>
+      <li>新协议：经单独授权用测试凭据核对 Anthropic/Gemini 划词和网页阅读、参数/鉴权、截断响应、取消及切换协议后的缓存隔离。</li>
     </ol>
   </aside>
   <script>

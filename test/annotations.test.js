@@ -83,6 +83,25 @@ function fixture(texts, excluded = false) {
 const entries = [{ term: 'robust', source: 'en', target: 'zh-cn', meaning: '<img onerror=alert(1)>' }];
 const settings = { annotations: true, source: 'auto', target: 'zh-cn' };
 
+test('关联词形沿用词条标注频率，关闭恢复原始词形文本', () => {
+  const { document } = createDOM();
+  const paragraph = document.createElement('p');
+  const original = document.createTextNode('run running ran');
+  paragraph.append(original);
+  document.body.append(paragraph);
+  const jobs = [];
+  const annotator = createAnnotator(document, (job) => jobs.push(job));
+  const words = [{ term: 'run', source: 'en', target: 'zh-cn', meaning: '跑', forms: ['running', 'ran'] }];
+  for (const [frequency, count] of [['all', 3], ['page', 1], ['paragraph', 1]]) {
+    annotator.refresh(words, { ...settings, annotationFrequency: frequency });
+    while (jobs.length) jobs.shift()();
+    assert.equal(paragraph.querySelectorAll('[data-tm-note]').length, count);
+    annotator.clear();
+    assert.deepEqual(paragraph.childNodes, [original]);
+    assert.equal(original.textContent, 'run running ran');
+  }
+});
+
 for (const annotationStyle of ['underline', 'highlight']) {
   test(`${annotationStyle} 装饰原词、点击显示纯文本卡片、关闭恢复节点身份`, () => {
     const { document } = createDOM();

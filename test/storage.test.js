@@ -86,3 +86,35 @@ test('日志写入失败返回失败，不阻断交互', () => {
   const store = createStore({ ...api, set() { throw new Error('quota'); } });
   assert.equal(store.appendLog({ event: 'test' }), false);
 });
+
+test('复习持久化保留词形和义项，拒绝陈旧卡片及删除后的评分', () => {
+  const { store, api } = fixture();
+  store.saveEntry({ ...entry, forms: ['arts'], senses: [{ meaning: '技巧' }] });
+  const original = store.entries()[0];
+  const now = Date.parse(entry.createdAt);
+  const updated = store.reviewEntry(original, 'known', now);
+  assert.equal(createStore(api).entries()[0].review.count, 1);
+  assert.deepEqual(updated.forms, ['arts']);
+  assert.deepEqual(updated.senses, [{ meaning: '技巧', example: '' }]);
+  assert.throws(() => store.reviewEntry(original, 'known', now), /已变化/);
+  store.removeEntry(updated);
+  assert.throws(() => store.reviewEntry(updated, 'known', now), /已删除/);
+  assert.deepEqual(store.entries(), []);
+});
+
+test('复习写入失败不伪造持久化成功', () => {
+  const { store, api } = fixture();
+  store.saveEntry(entry);
+  const failing = createStore({ ...api, set() { throw new Error('quota'); } });
+  assert.throws(() => failing.reviewEntry(store.entries()[0], 'known', Date.parse(entry.createdAt)), /quota/);
+  assert.equal(store.entries()[0].review, undefined);
+});
+
+test('词典配置独立保存，旧存储默认微软，不污染翻译设置', () => {
+  const { store, api } = fixture();
+  assert.equal(store.dictionary().mode, 'bing');
+  store.saveDictionary({ mode: 'javascript', url: 'https://dictionary.example/?q={term}', script: 'return {meaning: responseText};' });
+  assert.equal(createStore(api).dictionary().script, 'return {meaning: responseText};');
+  assert.equal(store.settings().protocol, 'openai');
+  assert.throws(() => store.saveDictionary({ mode: 'json', url: 'http://example.com?q={term}' }));
+});

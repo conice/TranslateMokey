@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TranslateMokey
 // @namespace    TranslateMokey
-// @version      0.2.0
-// @description  划词与双语网页翻译、生词本、动态标注、网站规则及可取消队列
+// @version      0.3.0
+// @description  多协议网页翻译、自定义词典与本地发音、词形与多义项生词本及间隔复习
 // @match        https://*/*
 // @match        http://*/*
 // @run-at       document-idle
