@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, BUILTIN_API_ID, MAX_API_PROFILES, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings, annotationAppearance, translationAppearance } from './core.js';
+import { DEFAULT_SETTINGS, BUILTIN_API_ID, BUILTIN_PROMPT_TEMPLATE, MAX_API_PROFILES, MAX_CUSTOM_PROMPT_LENGTH, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings, annotationAppearance, translationAppearance } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
 import { createTranslationQueue } from './queue.js';
 import { createReader } from './reader.js';
@@ -932,7 +932,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
 
   const dictionaryOptions = element('div');
   languageOptions.append(dictionaryOptions);
-  help(dictionaryOptions, '词典查询', '默认微软 Bing 英汉词典，释义通常为中文，不随翻译目标语言改变。查询会发送当前词，不发送上下文、网页地址或翻译密钥；每次查询单独确认。超过 200 字符请手动改用 AI，不会自动转发。');
+  help(dictionaryOptions, '词典查询', '默认微软 Bing 英汉词典，释义通常为中文，不随翻译目标语言改变。查询会发送当前词，不发送上下文、网页地址或翻译密钥；默认每次查询单独确认，可在设置中关闭。超过 200 字符请手动改用 AI，不会自动转发。');
   const speechGroup = element('details');
   speechGroup.append(element('summary', '本地发音语言'));
   const speechLanguage = field(speechGroup, '发音语言（明确语言代码，不支持 auto）', false, 35);
@@ -947,18 +947,21 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   }
   async function queryDictionary() {
     cancelDictionary();
-    if (sitePolicy(store.settings(), window.location?.hostname).mode === 'disabled') throw new Error('当前网站已禁用翻译与词典请求');
+    const settings = store.settings();
+    if (sitePolicy(settings, window.location?.hostname).mode === 'disabled') throw new Error('当前网站已禁用翻译与词典请求');
     const config = store.dictionary();
     const term = original.value.trim();
     if (!term || term.length > 200) {
       throw new Error('词典仅支持 1–200 字符，不会自动改用 AI');
     }
-    queryMessages.dictionary = '等待词典查询确认…';
-    renderQuery();
-    if (!window.confirm(`将使用 ${config.name || '当前词典'} 查询当前词（最多 200 字符）。${config.mode === 'javascript' ? '随后执行你保存的词典解析 JS。' : ''}不发送翻译密钥或上下文。是否查询？`)) {
-      queryMessages.dictionary = '已取消词典查询。';
+    if (!settings.hideDictionaryFeePopup) {
+      queryMessages.dictionary = '等待词典查询确认…';
       renderQuery();
-      return;
+      if (!window.confirm(`将使用 ${config.name || '当前词典'} 查询当前词（最多 200 字符）。${config.mode === 'javascript' ? '随后执行你保存的词典解析 JS。' : ''}不发送翻译密钥或上下文。是否查询？`)) {
+        queryMessages.dictionary = '已取消词典查询。';
+        renderQuery();
+        return;
+      }
     }
     queryMessages.dictionary = '词典查询中…';
     const current = dictionarySerial;
@@ -1038,7 +1041,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const launcherInput = choice('右下角“译”按钮功能', [['translate', '文本查询'], ['reading', '网页翻译'], ['words', '生词本'], ['review', '复习'], ['menu', '快捷菜单']]);
   settingsPage.append(element('p', '有选中文字时优先查询选区；无选区时打开所选功能。网页翻译仅打开页面，不直接发送正文。', 'hint'));
   const providerInput = choice('默认查询来源', [['ai', 'AI 翻译'], ['dictionary', '词典']]);
-  help(settingsPage, '选区查询', '选中文字本身不联网；点击选区入口后按默认来源查询并展示结果。AI 沿用费用确认设置，词典每次单独确认。词典失败或超过 200 字符时不会自动转发给 AI。');
+  help(settingsPage, '选区查询', '选中文字本身不联网；点击选区入口后按默认来源查询并展示结果。AI 与词典分别沿用各自的费用确认设置。词典失败或超过 200 字符时不会自动转发给 AI。');
   const defaultSource = field(settingsPage, '默认源语言', false, 35);
   const defaultTarget = field(settingsPage, '默认目标语言', false, 35);
   settingsPage = group(settingsRoot, 'AI 服务与凭据');
@@ -1079,12 +1082,26 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   apiEditor.append(keyStatus, keyActions, modelStatus, modelActions, apiEditorActions);
   serviceGroup.append(apiSummary, apiActions, apiEditor);
   help(serviceGroup, '地址与参数', 'Anthropic 地址示例 https://api.anthropic.com/v1；Gemini 示例 https://generativelanguage.googleapis.com/v1beta。填写 URL 和 API Key 后会自动拉取模型，也可手动填写；两者附加参数仅支持 temperature、top_p、max_tokens（Gemini 自动映射）。');
+  const promptModeInput = choice('AI 提示词', [['builtin', '内置（只读，仅输出最常用译文）'], ['custom', '自定义']]);
+  const builtinPromptLabel = element('label', '内置提示词（只读）');
+  const builtinPromptInput = element('textarea');
+  builtinPromptInput.value = BUILTIN_PROMPT_TEMPLATE;
+  builtinPromptInput.readOnly = true;
+  builtinPromptInput.setAttribute('aria-readonly', 'true');
+  builtinPromptLabel.append(builtinPromptInput);
+  serviceGroup.append(builtinPromptLabel);
+  const customPromptInput = field(serviceGroup, '自定义提示词（必须包含 {text}）', true, MAX_CUSTOM_PROMPT_LENGTH);
+  help(serviceGroup, '提示词说明', '内置提示词只读，要求模型只返回最符合上下文的一个最常用译文；模型仍可能不遵守。自定义提示词必须包含 {text}，可用 {target}、{source}、{sourceInstruction}；更改后停止网页阅读并清空翻译缓存，不发送请求。');
   let editingApiId = '';
   let apiDraft = false;
   let apiEditorOpen = false;
   let modelTask;
   let modelSerial = 0;
   let modelTimer;
+  function updatePromptVisibility() {
+    builtinPromptLabel.hidden = promptModeInput.value !== 'builtin';
+    customPromptInput.parentElement.hidden = promptModeInput.value !== 'custom';
+  }
   function setOptions(select, entries) {
     select.replaceChildren(...entries.map(([value, title]) => {
       const option = element('option', title);
@@ -1336,7 +1353,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   popupInput.type = 'checkbox';
   popupLabel.prepend(popupInput);
   settingsPage.append(popupLabel);
-  help(settingsPage, '费用确认', '默认保留 AI 请求前确认。关闭确认后，点击选区入口可能直接发送文本并产生费用；关闭弹窗不代表免费，不影响词典、网页阅读、删除或覆盖确认。');
+  help(settingsPage, '费用确认', '默认保留 AI 请求前确认。关闭确认后，点击选区入口可能直接发送文本并产生费用；关闭弹窗不代表免费，不影响词典自身的费用确认开关、网页阅读、删除或覆盖确认。');
   const annotationLabel = element('label', '开启本地生词标注（区分大小写，动态内容自动刷新）');
   const annotationInput = element('input');
   annotationInput.type = 'checkbox';
@@ -1397,6 +1414,12 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   dictionaryEditor.append(dictionaryEditorActions);
   settingsPage.append(dictionarySummary, dictionaryActions, dictionaryEditor);
   help(settingsPage, '解析格式', 'JSON 返回 {"meaning":"释义","phonetic":"音标","example":"例句"}。JS 示例：const data = JSON.parse(responseText); return { meaning: data.definition }; 代码在禁网 Worker 内执行，不能访问 DOM/GM；2 秒超时。只保存可信代码，配置不进入备份。');
+  const dictionaryPopupLabel = element('label', '关闭弹窗（不再显示词典请求前的费用确认）');
+  const dictionaryPopupInput = element('input');
+  dictionaryPopupInput.type = 'checkbox';
+  dictionaryPopupLabel.prepend(dictionaryPopupInput);
+  settingsPage.append(dictionaryPopupLabel);
+  help(settingsPage, '词典费用确认', '默认保留词典请求前确认。关闭后，点击查询会直接发送当前词并可能产生费用；关闭弹窗不代表免费，不影响自定义 JS 保存、删除、覆盖或网页阅读确认。');
   let editingDictionaryId = '';
   let dictionaryDraft = false;
   let dictionaryEditorOpen = false;
@@ -1617,7 +1640,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.4',
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.4.5',
       build: 'unified-query', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
@@ -1646,7 +1669,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (JSON.stringify(previous) === JSON.stringify(next)) return true;
     const hostname = window.location?.hostname;
     const automaticHosts = next.siteRules.filter((rule) => rule.mode === 'auto').map((rule) => rule.host);
-    const affectsRequests = ['apiSelect', 'apiProfile', 'site', 'source', 'target', 'knownLanguages'].includes(section);
+    const affectsRequests = ['apiSelect', 'apiProfile', 'promptMode', 'customPrompt', 'site', 'source', 'target', 'knownLanguages'].includes(section);
     if (affectsRequests && automaticHosts.length && !window.confirm(`授权以下域名下次加载时自动发送可见及动态正文：${automaticHosts.join('、')}\n接收方 ${next.apiName}，可能持续产生费用。授权使用本次保存的服务与语言设置，是否继续？`)) { loadSettings(); return false; }
     store.saveSettings(next);
     settings = next;
@@ -1692,6 +1715,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     const draft = { source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
       lookupProvider: providerInput.value, launcherAction: launcherInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
+      hideDictionaryFeePopup: dictionaryPopupInput.checked,
+      promptMode: promptModeInput.value, customPrompt: customPromptInput.value,
       annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
       annotationFontSize: fineValue(annotationFontSizeInput), annotationColor: fineValue(annotationColorInput),
       annotationSpacing: fineValue(annotationSpacingInput), annotationHighlightColor: fineValue(annotationHighlightInput),
@@ -1699,7 +1724,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       translationFontSize: fineValue(translationFontSizeInput), translationLineHeight: fineValue(translationLineHeightInput),
       translationColor: fineValue(translationColorInput), translationSpacing: fineValue(translationSpacingInput), masteredDisplay: masteredDisplayInput.value,
       knownLanguages: knownLanguagesInput.value.split(',').map((value) => value.trim()).filter(Boolean), siteRules };
-    const keys = section === 'site' ? ['siteRules'] : [section];
+    const keys = section === 'site' ? ['siteRules'] : section === 'promptMode' ? ['promptMode', 'customPrompt'] : [section];
     return commitSettings(previous, validateSettings({ ...previous, ...Object.fromEntries(keys.map((key) => [key, draft[key]])) }), section);
   }
   function applyTypography() {
@@ -1712,6 +1737,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   }
   for (const [input, section] of [
     [launcherInput, 'launcherAction'], [providerInput, 'lookupProvider'], [defaultSource, 'source'], [defaultTarget, 'target'],
+    [promptModeInput, 'promptMode'], [customPromptInput, 'customPrompt'],
+    [dictionaryPopupInput, 'hideDictionaryFeePopup'],
     [popupInput, 'hideFeePopup'], [annotationInput, 'annotations'], [frequencyInput, 'annotationFrequency'],
     [annotationStyleInput, 'annotationStyle'], [translationModeInput, 'translationMode'],
     [annotationFontSizeInput, 'annotationFontSize'], [annotationColorInput, 'annotationColor'],
@@ -1723,6 +1750,10 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   ]) {
     input.addEventListener('change', (event) => {
       if (!event.isTrusted) return;
+      if (input === promptModeInput) {
+        if (promptModeInput.value === 'custom' && !customPromptInput.value.trim()) customPromptInput.value = BUILTIN_PROMPT_TEMPLATE;
+        updatePromptVisibility();
+      }
       if (fineControls.has(input) && input.value !== 'custom') loadFine(input, input.value);
       autoSave(() => saveSettings(section));
     });
@@ -1775,6 +1806,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     providerInput.value = settings.lookupProvider;
     launcherInput.value = settings.launcherAction;
     popupInput.checked = settings.hideFeePopup;
+    dictionaryPopupInput.checked = settings.hideDictionaryFeePopup;
+    promptModeInput.value = settings.promptMode;
+    customPromptInput.value = settings.customPrompt;
+    builtinPromptInput.value = BUILTIN_PROMPT_TEMPLATE;
+    updatePromptVisibility();
     loadAppearanceSettings();
     knownLanguagesInput.value = settings.knownLanguages.join(', ');
     const policy = sitePolicy(settings, window.location?.hostname);

@@ -1,5 +1,5 @@
 import { boundedText, serviceEndpoint, validateSettings } from './core.js';
-import { translate } from './service.js';
+import { translate, translationPrompt } from './service.js';
 
 export function createTranslationQueue(request) {
   const waiting = [];
@@ -42,7 +42,8 @@ export function createTranslationQueue(request) {
     if (config.source === config.target) throw new Error('源语言与目标语言相同，无须翻译');
     if (credential !== key) { clearCache(); credential = key; }
     const extra = Object.keys(config.extra).sort().map((name) => [name, config.extra[name]]);
-    const id = JSON.stringify([2, config.protocol, serviceEndpoint(config), config.model, config.source, config.target, extra, text]);
+    const id = JSON.stringify([3, config.protocol, serviceEndpoint(config), config.model, config.source, config.target,
+      translationPrompt(config, ''), extra, text]);
     if (!bypassCache && cache.has(id)) {
       const result = cache.get(id);
       cache.delete(id);

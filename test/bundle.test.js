@@ -97,7 +97,7 @@ test('说明按钮位于对应功能旁而非页面标题，内容按主题展�
   const app = translationApp();
   const dialog = app.nodes.find((node) => node.className === 'help-dialog');
   const controls = app.nodes.filter((node) => node.className === 'help-trigger');
-  assert.equal(controls.length, 14);
+  assert.equal(controls.length, 16);
   assert.equal(dialog.id, 'tm-help');
   assert.equal(dialog.getAttribute('aria-labelledby'), 'tm-help-title');
   for (const control of controls) {
@@ -485,6 +485,24 @@ test('默认词典只发送词典请求，结果可编辑收藏且不调用 AI',
   assert.equal(app.requests.length, 1);
 });
 
+test('词典费用确认可独立关闭并保存，关闭后直接请求', async () => {
+  const app = translationApp({ lookupProvider: 'dictionary' });
+  app.values.set('tm:dictionary', { version: 1, value: { mode: 'json', url: 'https://dictionary.example/?q={term}', script: '' } });
+  const label = app.nodes.find((node) => node.textContent === '关闭弹窗（不再显示词典请求前的费用确认）');
+  const checkbox = label.children[0];
+  assert.equal(checkbox.checked, false);
+  checkbox.checked = true;
+  await app.change(checkbox);
+  const saved = app.values.get('tm:settings').value;
+  assert.equal(saved.hideDictionaryFeePopup, true);
+  assert.equal(saved.hideFeePopup, false);
+  await app.select('hello');
+  await app.click('翻译选区');
+  assert.equal(app.confirmations.length, 0);
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].method, 'GET');
+});
+
 test('词典超长与拒绝确认均不回退 AI，切换来源必须显式点击', async () => {
   const app = translationApp({ lookupProvider: 'dictionary', hideFeePopup: true });
   await app.select('word '.repeat(50));
@@ -751,6 +769,37 @@ test('默认 API 只读脱敏；可添加多个自定义 API、拉取模型并�
   assert.equal(saved.selectedApiId, DEFAULT_SETTINGS.selectedApiId);
   assert.equal(app.values.get('tm:secret:api:' + secondId), '');
   assert.equal(app.requests.length, 2);
+});
+
+test('AI 提示词内置只读，自定义提示词保存后用于请求', async () => {
+  const app = translationApp({ hideFeePopup: true });
+  const mode = app.nodes.find((node) => node.textContent === 'AI 提示词').children[0];
+  const builtinLabel = app.nodes.find((node) => node.textContent === '内置提示词（只读）');
+  const builtin = builtinLabel.children[0];
+  const customLabel = app.nodes.find((node) => node.textContent === '自定义提示词（必须包含 {text}）');
+  const custom = customLabel.children[0];
+  assert.equal(mode.value, 'builtin');
+  assert.equal(builtin.readOnly, true);
+  assert.match(builtin.value, /single most common translation/);
+  assert.equal(builtinLabel.hidden, false);
+  assert.equal(customLabel.hidden, true);
+
+  mode.value = 'custom';
+  await app.change(mode);
+  assert.equal(builtinLabel.hidden, true);
+  assert.equal(customLabel.hidden, false);
+  assert.equal(custom.value, builtin.value);
+  assert.equal(app.values.get('tm:settings').value.promptMode, 'custom');
+
+  custom.value = 'Translate {text} into {target}; return one common meaning only.';
+  await app.change(custom);
+  assert.equal(app.values.get('tm:settings').value.customPrompt, custom.value);
+  await app.select('hello');
+  await app.click('翻译选区');
+  assert.equal(app.requests.length, 1);
+  assert.equal(JSON.parse(app.requests[0].data).messages[0].content,
+    'Translate hello into zh-cn; return one common meaning only.');
+  assert.equal(app.confirmations.length, 0);
 });
 
 test('可添加多个词典，切换后查询使用选中词典', async () => {
@@ -1221,12 +1270,12 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   await app.click('查询');
   await app.click('设置');
   await app.click('导出诊断日志');
-  const preview = app.nodes.find((node) => node.readOnly);
+  const preview = app.nodes.find((node) => node.textContent === '诊断日志（下载失败时可全选复制）').children[0];
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.scriptVersion, '0.4.4');
+  assert.equal(data.scriptVersion, '0.4.5');
   assert.equal(data.scriptVersion, JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
-  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.4\b/);
+  assert.match(readFileSync(new URL('../src/metadata.txt', import.meta.url), 'utf8'), /@version\s+0\.4\.5\b/);
   assert.equal(data.build, 'unified-query');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);
@@ -1251,7 +1300,7 @@ test('面板未打开也能从脚本菜单导出；存储不可用仍可导出�
   app.menuActions.get('导出 TranslateMokey 诊断日志')();
   assert.equal(app.nodes.find((node) => node.className === 'panel').hidden, true);
   assert.equal(app.downloads.length, 1);
-  const data = JSON.parse(app.nodes.find((node) => node.readOnly).value);
+  const data = JSON.parse(app.nodes.find((node) => node.textContent === '诊断日志（下载失败时可全选复制）').children[0].value);
   assert.ok(data.logs.some((entry) => entry.event === 'selection-read'));
   assert.equal(app.requests.length, 0);
 });
@@ -1261,7 +1310,7 @@ test('异常日志仅记录类型，不导出可能含秘密的错误正文', as
   app.context.window.getSelection = () => { throw new TypeError('PRIVATE_ERROR_TEXT'); };
   await app.click('译');
   app.menuActions.get('导出 TranslateMokey 诊断日志')();
-  const output = app.nodes.find((node) => node.readOnly).value;
+  const output = app.nodes.find((node) => node.textContent === '诊断日志（下载失败时可全选复制）').children[0].value;
   assert.ok(!output.includes('PRIVATE_ERROR_TEXT'));
   assert.ok(JSON.parse(output).logs.some((entry) => entry.event === 'selection-read-error'));
 });
@@ -1275,7 +1324,7 @@ test('下载失败时诊断文本已生成，可从设置手动复制', async ()
     return node;
   };
   app.menuActions.get('导出 TranslateMokey 诊断日志')();
-  const preview = app.nodes.find((node) => node.readOnly);
+  const preview = app.nodes.find((node) => node.textContent === '诊断日志（下载失败时可全选复制）').children[0];
   assert.equal(JSON.parse(preview.value).format, 'TranslateMokey-diagnostics');
   assert.equal(preview.parentElement.hidden, false);
   assert.equal(app.alerts.length, 1);

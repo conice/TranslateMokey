@@ -92,6 +92,25 @@ test('缓存复用并隔离端点、模型、语言、参数、密钥与显式�
   await cleared.promise;
 });
 
+test('提示词变化隔离缓存，未启用的自定义草稿不拆分内置缓存', async () => {
+  const app = fixture();
+  const draft = app.queue.enqueue({ ...DEFAULT_SETTINGS, customPrompt: 'unused draft' }, '', 'same');
+  await tick();
+  app.reply(0);
+  assert.equal(await draft.promise, '译文');
+  assert.equal(await app.queue.enqueue(DEFAULT_SETTINGS, '', 'same').promise, '译文');
+  assert.equal(app.requests.length, 1);
+
+  const custom = { ...DEFAULT_SETTINGS, promptMode: 'custom', customPrompt: 'Translate {text} into {target}.' };
+  const changed = app.queue.enqueue(custom, '', 'same');
+  await tick();
+  assert.equal(app.requests.length, 2);
+  app.reply(1);
+  assert.equal(await changed.promise, '译文');
+  assert.equal(await app.queue.enqueue(custom, '', 'same').promise, '译文');
+  assert.equal(app.requests.length, 2);
+});
+
 test('错误不缓存且后续任务继续，立即取消不启动请求', async () => {
   const app = fixture();
   const cancelled = app.queue.enqueue(DEFAULT_SETTINGS, '', 'cancelled');

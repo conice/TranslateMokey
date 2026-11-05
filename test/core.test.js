@@ -87,9 +87,11 @@ test('旧设置缺失新开关时默认关闭，拒绝非布尔值', () => {
   const legacy = { ...DEFAULT_SETTINGS };
   delete legacy.autoTranslate;
   delete legacy.hideFeePopup;
+  delete legacy.hideDictionaryFeePopup;
   assert.equal(validateSettings(legacy).autoTranslate, false);
   assert.equal(validateSettings(legacy).hideFeePopup, false);
-  for (const key of ['autoTranslate', 'hideFeePopup']) {
+  assert.equal(validateSettings(legacy).hideDictionaryFeePopup, false);
+  for (const key of ['autoTranslate', 'hideFeePopup', 'hideDictionaryFeePopup']) {
     for (const value of ['true', 1, null]) assert.throws(() => validateSettings({ ...legacy, [key]: value }));
     assert.equal(validateSettings({ ...legacy, [key]: true })[key], true);
   }
@@ -101,6 +103,26 @@ test('默认查询来源兼容旧设置且拒绝未知来源', () => {
   assert.equal(validateSettings(legacy).lookupProvider, 'ai');
   assert.equal(validateSettings({ ...legacy, lookupProvider: 'dictionary' }).lookupProvider, 'dictionary');
   assert.throws(() => validateSettings({ ...legacy, lookupProvider: 'remote' }));
+});
+
+test('AI 提示词默认内置，自定义模板必须包含待翻译文本占位符', () => {
+  const defaults = validateSettings(DEFAULT_SETTINGS);
+  assert.equal(defaults.promptMode, 'builtin');
+  assert.equal(defaults.customPrompt, '');
+  const custom = validateSettings({ ...DEFAULT_SETTINGS, promptMode: 'custom',
+    customPrompt: 'Translate {text} into {target} using {source} and {sourceInstruction}.' });
+  assert.equal(custom.promptMode, 'custom');
+  assert.match(custom.customPrompt, /\{text\}/);
+  const unused = validateSettings({ ...DEFAULT_SETTINGS, customPrompt: 'unused draft' });
+  assert.equal(unused.promptMode, 'builtin');
+  assert.equal(unused.customPrompt, 'unused draft');
+  for (const patch of [
+    { promptMode: 'unknown' },
+    { promptMode: 'custom', customPrompt: '' },
+    { promptMode: 'custom', customPrompt: '   ' },
+    { promptMode: 'custom', customPrompt: 'Translate into {target}.' },
+    { promptMode: 'custom', customPrompt: `${'x'.repeat(8000)}{text}` },
+  ]) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
 });
 
 test('Index 预设与 URL 规范化', () => {

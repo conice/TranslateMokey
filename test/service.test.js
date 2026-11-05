@@ -19,6 +19,8 @@ test('构造非流式请求、附加参数及隐私边界', async () => {
   assert.deepEqual(data.chat_template_kwargs, { enable_thinking: false });
   assert.equal(data.messages.length, 1);
   assert.match(data.messages[0].content, /source language from the text/);
+  assert.match(data.messages[0].content, /single most common translation/);
+  assert.match(data.messages[0].content, /Do not include alternatives/);
   assert.ok(!sent.data.includes('sample-key'));
 });
 
@@ -76,6 +78,19 @@ test('空文本、超长文本及相同语言不发请求', () => {
   assert.throws(() => translate(request, DEFAULT_SETTINGS, '', ' '));
   assert.throws(() => translate(request, DEFAULT_SETTINGS, '', 'a'.repeat(10001)));
   assert.throws(() => translate(request, { ...DEFAULT_SETTINGS, source: 'zh-CN' }, '', 'text'), /相同/);
+});
+
+test('自定义提示词替换占位符，原文中的占位符不会被二次替换', async () => {
+  let sent;
+  const config = { ...DEFAULT_SETTINGS, source: 'en', promptMode: 'custom',
+    customPrompt: '{target}|{source}|{sourceInstruction}|{text}' };
+  const task = translate((options) => {
+    sent = options;
+    options.onload({ status: 200, responseText: '{"choices":[{"message":{"content":"译文"}}]}' });
+  }, config, '', 'literal {target}');
+  assert.equal(await task.promise, '译文');
+  assert.equal(JSON.parse(sent.data).messages[0].content,
+    'zh-cn|en|The source language is en.|literal {target}');
 });
 
 for (const protocol of ['anthropic', 'gemini']) {
