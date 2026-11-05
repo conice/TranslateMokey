@@ -17,8 +17,30 @@
   <textarea aria-label="私有输入">robust private draft: do not capture selections here</textarea>
   <div contenteditable="true">robust editable content: do not annotate or capture</div>
   <div hidden>robust hidden content</div>
-  <button id="append" type="button">添加动态段落（手动刷新标注后生效）</button>
+  <p translate="no">robust opt-out content must not be sent.</p>
+  <button id="append" type="button">添加动态段落（自动翻译 / 标注）</button>
+  <button id="replace" type="button">替换原段落（拒绝旧译文）</button>
+  <button id="route" type="button">模拟 SPA 路由切换（停止翻译）</button>
+  <div style="height:110vh" aria-hidden="true"></div>
+  <p>This robust paragraph should only translate after scrolling into view.</p>
+  <p><span style="display:none">Private hidden inline text must not be sent.</span>Visible public text.</p>
+  <p><span style="visibility:hidden">Private invisible inline text.</span>More public text.</p>
+  <p>Mode test: switch to translation-only and back. <a href="#result">This link must keep its click event.</a></p>
+  <p>Long paragraph starts here. <strong>Emphasis</strong> remains in the source. <em>Italic</em> remains too.</p>
+  <table><tbody><tr><td>A robust table cell.</td><td>Second cell.</td></tr></tbody></table>
+  <ul><li>First robust list item.</li><li>Second list item.</li></ul>
   <p id="result" role="status"></p>
+  <aside aria-label="手动验收清单" style="border:1px solid #888;padding:1rem;margin-top:2rem">
+    <h2>第二阶段手动验收</h2>
+    <ol>
+      <li>仅译文：原文隐藏，链接仍可点击；切回双语后原文位置与事件不变。恢复原文后页面文本与初始一致。</li>
+      <li>逐段模式：打开后不自动请求；点击“翻译本段”才请求；“重新翻译”会更新译文且不重用旧缓存。</li>
+      <li>动态：添加/替换正文会自动处理；点击验收按钮、脚本控件与译文变更不应触发新正文请求。</li>
+      <li>隐私：输入框、编辑区、代码、隐藏与 translate="no" 内容不得出现在请求中。需在网络面板核对。</li>
+      <li>长页与移动端：滚动到页尾，译文不重叠；暂停、继续、SPA 路由后停止并恢复。</li>
+      <li>标注：四次设置分别检查每次/每页/每段首次，后释义/展开/下划线/高亮；已掌握词按隐藏/淡化显示。</li>
+    </ol>
+  </aside>
   <script>
     document.querySelector('#link').addEventListener('click', (event) => {
       event.preventDefault();
@@ -28,6 +50,12 @@
       const paragraph = document.createElement('p');
       paragraph.textContent = 'A newly added robust paragraph.';
       document.body.append(paragraph);
+    });
+    document.querySelector('#replace').addEventListener('click', () => {
+      document.querySelector('p').textContent = 'The robust paragraph has changed.';
+    });
+    document.querySelector('#route').addEventListener('click', () => {
+      history.pushState({}, '', `?route=${Date.now()}`);
     });
   </script>
 </body>

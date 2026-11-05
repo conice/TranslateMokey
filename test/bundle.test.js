@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { DEFAULT_SETTINGS } from '../src/core.js';
 
-const modules = ['core', 'storage', 'service', 'annotations', 'ui', 'main'];
+const modules = ['core', 'storage', 'service', 'queue', 'annotations', 'reader', 'ui', 'main'];
 const source = `(() => { 'use strict'; ${modules.map((name) => readFileSync(new URL(`../src/${name}.js`, import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '').replace(/^export /gm, '')).join('\n')} })();`;
 
@@ -89,7 +89,7 @@ function translationApp(options = {}, allowConfirm = true) {
     request.onload({ status: 200, responseText: '{"choices":[{"message":{"content":"稳健的"}}]}' });
     return { abort() {} };
   };
-  app.context.window.location = { origin: 'https://example.com', pathname: '/' };
+  app.context.window.location = { origin: 'https://example.com', hostname: 'example.com', pathname: '/', href: 'https://example.com/' };
   app.context.window.confirm = (message) => { confirmations.push(message); return allowConfirm; };
   let selectedText = 'robust';
   let excluded = false;
@@ -115,6 +115,37 @@ function translationApp(options = {}, allowConfirm = true) {
   };
   return { ...app, requests, confirmations, click, select, values, exclude() { excluded = true; }, failStorage() { failStorage = true; } };
 }
+
+test('网页阅读确认独立于费用弹窗开关，拒绝授权不请求', async () => {
+  const app = translationApp({ hideFeePopup: true }, false);
+  await app.click('开启双语阅读');
+  assert.equal(app.confirmations.length, 1);
+  assert.match(app.confirmations[0], /动态加载/);
+  assert.equal(app.requests.length, 0);
+});
+
+test('网站禁用同时阻止手动划词与网页阅读请求', async () => {
+  const app = translationApp({ siteRules: [{ host: 'example.com', mode: 'disabled', annotations: false }] });
+  await app.select();
+  await app.click('翻译选区');
+  await app.click('翻译 / 重试');
+  await app.click('开启双语阅读');
+  assert.equal(app.requests.length, 0);
+  assert.equal(app.confirmations.length, 0);
+});
+
+test('保存自动网站规则需额外授权，拒绝不写入，接受也不立即请求', async () => {
+  for (const accepted of [false, true]) {
+    const app = translationApp({}, accepted);
+    const selector = app.nodes.find((node) => node.tag === 'select' && node.children.some((option) => option.textContent === '自动双语阅读'));
+    selector.value = 'auto';
+    await app.click('保存设置');
+    assert.equal(app.confirmations.length, 1);
+    assert.match(app.confirmations[0], /example\.com/);
+    assert.equal(app.values.get('tm:settings').value.siteRules.length, Number(accepted));
+    assert.equal(app.requests.length, 0);
+  }
+});
 
 for (const autoTranslate of [false, true]) {
   for (const hideFeePopup of [false, true]) {
@@ -258,7 +289,7 @@ test('事件链与导出日志不包含原文、响应、服务 URL 或密钥', 
   const preview = app.nodes.find((node) => node.readOnly);
   const data = JSON.parse(preview.value);
   assert.equal(data.format, 'TranslateMokey-diagnostics');
-  assert.equal(data.build, 'selection-diagnostics-2');
+  assert.equal(data.build, 'web-reading');
   assert.equal(app.downloads[0], 'TranslateMokey-diagnostics.json');
   assert.equal(preview.parentElement.hidden, false);
   for (const event of ['ready', 'selection-read', 'input-capture', 'button-click', 'panel-open', 'translation-request', 'translation-success', 'export-layout']) {

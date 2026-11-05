@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAnnotator, isExcluded } from '../src/annotations.js';
+import { createDOM } from './dom.js';
 
 function fixture(texts, excluded = false) {
   const children = [];
@@ -45,7 +46,9 @@ function fixture(texts, excluded = false) {
     body,
     documentElement: { lang: 'en' },
     createElement() {
-      const element = nodeMethods({ nodeType: 1, dataset: {}, style: {}, closest: () => element });
+      const element = nodeMethods({ nodeType: 1, dataset: {}, style: {}, closest: () => element,
+        setAttribute(name, value) { this[name] = value; },
+        addEventListener(name, callback) { this[name] = callback; } });
       element.attachShadow = () => ({ append(label) { element.label = label; } });
       return element;
     },
@@ -71,7 +74,7 @@ function fixture(texts, excluded = false) {
   const jobs = [];
   const annotator = createAnnotator(document, (job) => jobs.push(job));
   return {
-    children, originals, annotator,
+    children, originals, annotator, document,
     flush() { let count = 0; while (jobs.length) { assert.ok(count++ < 1000, '批处理必须终止'); jobs.shift()(); } },
     notes: () => children.filter((node) => node.nodeType === 1),
   };
@@ -79,6 +82,129 @@ function fixture(texts, excluded = false) {
 
 const entries = [{ term: 'robust', source: 'en', target: 'zh-cn', meaning: '<img onerror=alert(1)>' }];
 const settings = { annotations: true, source: 'auto', target: 'zh-cn' };
+
+for (const annotationStyle of ['underline', 'highlight']) {
+  test(`${annotationStyle} 装饰原词、点击显示纯文本卡片、关闭恢复节点身份`, () => {
+    const { document } = createDOM();
+    const paragraph = document.createElement('p');
+    const original = document.createTextNode('A robust design.');
+    paragraph.append(original);
+    document.body.append(paragraph);
+    const jobs = [];
+    const annotator = createAnnotator(document, (job) => jobs.push(job));
+    annotator.refresh(entries, { ...settings, annotationStyle });
+    while (jobs.length) jobs.shift()();
+    const marked = paragraph.querySelector('[data-tm-mark]');
+    const note = paragraph.querySelector('[data-tm-note]');
+    assert.equal(marked.textContent, 'robust');
+    assert.equal(note.style.display, 'none');
+    marked.click();
+    assert.equal(note.style.display, '');
+    assert.equal(note.label.textContent, '〔<img onerror=alert(1)>〕');
+    annotator.clear();
+    assert.deepEqual(paragraph.childNodes, [original]);
+    assert.equal(original.textContent, 'A robust design.');
+  });
+}
+
+test('动态标注局部刷新不重建未变化段落，译文与控件不触发重扫', async () => {
+  const { document, scans } = createDOM();
+  let callback;
+  document.defaultView = { MutationObserver: class {
+    constructor(handler) { this.handler = handler; }
+    observe() { callback = this.handler; }
+    disconnect() { callback = undefined; }
+  } };
+  const paragraphs = ['robust', 'plain'].map((text) => {
+    const paragraph = document.createElement('p');
+    paragraph.textContent = text;
+    document.body.append(paragraph);
+    return paragraph;
+  });
+  const jobs = [];
+  const annotator = createAnnotator(document, (job) => jobs.push(job));
+  annotator.refresh(entries, settings);
+  while (jobs.length) jobs.shift()();
+  const originalNote = paragraphs[0].querySelector('[data-tm-note]');
+  scans.length = 0;
+  paragraphs[1].firstChild.data = 'robust';
+  callback([{ type: 'characterData', target: paragraphs[1].firstChild }]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  while (jobs.length) jobs.shift()();
+  assert.deepEqual(scans, [paragraphs[1]]);
+  assert.equal(paragraphs[0].querySelector('[data-tm-note]'), originalNote);
+  assert.ok(paragraphs[1].querySelector('[data-tm-note]'));
+  scans.length = 0;
+  const translation = document.createElement('span');
+  translation.dataset.tmTranslation = '';
+  callback([{ type: 'childList', target: paragraphs[0], addedNodes: [translation], removedNodes: [] }]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(scans.length, 0);
+  annotator.clear();
+});
+
+test('已掌握词可隐藏、淡化或正常显示，变化后不残留旧标注', () => {
+  const mastered = [{ ...entries[0], mastered: true }];
+  for (const [masteredDisplay, expected] of [['hide', 0], ['dim', 1], ['show', 1]]) {
+    const page = fixture(['robust']);
+    page.annotator.refresh(mastered, { ...settings, masteredDisplay });
+    page.flush();
+    assert.equal(page.notes().length, expected);
+    if (expected) assert.equal(page.notes()[0].style.opacity, masteredDisplay === 'dim' ? '0.45' : undefined);
+    page.annotator.clear();
+    assert.deepEqual(page.children, page.originals);
+  }
+});
+
+test('紧凑样式点击展开纯文本释义并可恢复', () => {
+  const page = fixture(['robust']);
+  page.annotator.refresh(entries, { ...settings, annotationStyle: 'compact' });
+  page.flush();
+  const label = page.notes()[0].label;
+  assert.equal(label.textContent, '〔释义〕');
+  label.click();
+  assert.equal(label.textContent, '〔<img onerror=alert(1)>〕');
+  assert.equal(label['aria-expanded'], 'true');
+  label.click();
+  assert.equal(label.textContent, '〔释义〕');
+  page.annotator.clear();
+  assert.deepEqual(page.children, page.originals);
+});
+
+test('动态文本变化触发去抖刷新，关闭后断开观察器', async () => {
+  const page = fixture(['plain']);
+  let observe;
+  let disconnected = 0;
+  page.document.defaultView = { MutationObserver: class {
+    constructor(callback) { observe = callback; }
+    observe() {}
+    disconnect() { disconnected += 1; }
+  } };
+  page.annotator.refresh(entries, settings);
+  page.flush();
+  page.originals[0].data = 'robust';
+  observe([{ type: 'characterData', target: page.originals[0] }]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  page.flush();
+  assert.equal(page.notes().length, 1);
+  page.annotator.clear();
+  assert.ok(disconnected >= 2);
+});
+
+test('每页或每段首次按正向文本顺序计数，重复刷新保持稳定', () => {
+  for (const annotationFrequency of ['page', 'paragraph']) {
+    const page = fixture(['robust and robust', 'robust']);
+    page.annotator.refresh(entries, { ...settings, annotationFrequency });
+    page.flush();
+    assert.equal(page.notes().length, 1);
+    assert.equal(page.children[0].textContent, 'robust');
+    page.annotator.refresh(entries, { ...settings, annotationFrequency });
+    page.flush();
+    assert.equal(page.notes().length, 1);
+    page.annotator.clear();
+    assert.deepEqual(page.children, page.originals);
+  }
+});
 
 test('词后插入纯文本，关闭恢复原始文本节点身份', () => {
   const page = fixture(['A robust and robust design.']);

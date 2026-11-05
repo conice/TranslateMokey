@@ -11,6 +11,16 @@ export const DEFAULT_SETTINGS = Object.freeze({
   annotations: false,
   autoTranslate: false,
   hideFeePopup: false,
+  annotationFrequency: 'all',
+  annotationStyle: 'inline',
+  translationStyle: 'muted',
+  translationMode: 'bilingual',
+  translationFontSize: 1,
+  translationLineHeight: 1.7,
+  translationColor: 'inherit',
+  masteredDisplay: 'hide',
+  knownLanguages: [],
+  siteRules: [],
 });
 
 export function boundedText(value, name, limit, optional = false) {
@@ -68,12 +78,58 @@ export function validateSettings(value) {
   for (const key of ['autoTranslate', 'hideFeePopup']) {
     if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new Error('自动翻译与弹窗开关必须是布尔值');
   }
+  const annotationFrequency = value.annotationFrequency ?? 'all';
+  const annotationStyle = value.annotationStyle ?? 'inline';
+  const translationStyle = value.translationStyle ?? 'muted';
+  const translationMode = value.translationMode ?? 'bilingual';
+  const translationFontSize = value.translationFontSize ?? 1;
+  const translationLineHeight = value.translationLineHeight ?? 1.7;
+  const translationColor = value.translationColor ?? (translationStyle === 'accent' ? 'accent' : 'inherit');
+  const masteredDisplay = value.masteredDisplay ?? 'hide';
+  if (!['hide', 'dim', 'show'].includes(masteredDisplay)) throw new Error('已掌握词显示策略无效');
+  if (!Array.isArray(value.knownLanguages ?? []) || (value.knownLanguages ?? []).length > 30) throw new Error('已掌握语言列表无效');
+  const knownLanguages = [...new Set((value.knownLanguages ?? []).map((code) => language(code)))];
+  if (!['all', 'page', 'paragraph'].includes(annotationFrequency)) throw new Error('标注频率无效');
+  if (!['inline', 'compact', 'underline', 'highlight'].includes(annotationStyle)) throw new Error('标注样式无效');
+  if (!['muted', 'accent'].includes(translationStyle)) throw new Error('译文样式无效');
+  if (!['bilingual', 'translation-only'].includes(translationMode)) throw new Error('网页阅读模式无效');
+  if (typeof translationFontSize !== 'number' || !Number.isFinite(translationFontSize)
+    || translationFontSize < 0.75 || translationFontSize > 2) throw new Error('译文字号无效');
+  if (typeof translationLineHeight !== 'number' || !Number.isFinite(translationLineHeight)
+    || translationLineHeight < 1.2 || translationLineHeight > 3) throw new Error('译文行距无效');
+  if (!['inherit', 'accent', 'muted'].includes(translationColor)) throw new Error('译文颜色无效');
+  const rules = value.siteRules ?? [];
+  if (!Array.isArray(rules) || rules.length > 100) throw new Error('网站规则最多 100 条');
+  const siteRules = rules.map((rule) => {
+    if (!rule || typeof rule !== 'object' || typeof rule.host !== 'string'
+      || !/^[a-z0-9.-]+$/.test(rule.host) || rule.host.length > 253
+      || new URL(`https://${rule.host}`).hostname !== rule.host
+      || !['manual', 'auto', 'disabled'].includes(rule.mode)
+      || typeof rule.annotations !== 'boolean') throw new Error('网站规则格式无效');
+    return { host: rule.host, mode: rule.mode, annotations: rule.annotations,
+      ...(rule.source ? { source: language(rule.source, true) } : {}),
+      ...(rule.target ? { target: language(rule.target) } : {}) };
+  });
+  if (new Set(siteRules.map((rule) => rule.host)).size !== siteRules.length) throw new Error('网站规则重复');
   return {
     endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
     source: language(value.source, true), target: language(value.target),
     extra: JSON.parse(JSON.stringify(extra)), annotations: value.annotations,
     autoTranslate: value.autoTranslate ?? false, hideFeePopup: value.hideFeePopup ?? false,
+    annotationFrequency, annotationStyle, translationStyle, siteRules,
+    translationMode, translationFontSize, translationLineHeight, translationColor,
+    masteredDisplay, knownLanguages,
   };
+}
+
+export function sitePolicy(settings, hostname) {
+  return settings.siteRules?.find((rule) => rule.host === hostname)
+    ?? { mode: 'manual', annotations: true };
+}
+
+export function siteSettings(settings, hostname) {
+  const rule = sitePolicy(settings, hostname);
+  return { ...settings, source: rule.source || settings.source, target: rule.target || settings.target };
 }
 
 export function validateEntry(value) {
@@ -88,6 +144,10 @@ export function validateEntry(value) {
     url: boundedText(value.url ?? '', '来源链接', 2048, true),
     createdAt: boundedText(value.createdAt, '收藏时间', 40),
   };
+  if (value.mastered !== undefined) {
+    if (typeof value.mastered !== 'boolean') throw new Error('已掌握状态无效');
+    entry.mastered = value.mastered;
+  }
   if (!Number.isFinite(Date.parse(entry.createdAt))) throw new Error('收藏时间无效');
   if (entry.url) {
     let url;

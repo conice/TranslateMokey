@@ -1,8 +1,53 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateEntry, validateSettings } from '../src/core.js';
+import { DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateEntry, validateSettings, sitePolicy, siteSettings } from '../src/core.js';
 
 export const sample = { term: 'robust', source: 'en', target: 'zh-cn', meaning: '稳健的', example: '', note: '', title: 'Example', url: 'https://example.com/article', createdAt: '2026-11-05T00:00:00.000Z' };
+
+test('第二阶段设置兼容旧数据，规则仅精确匹配域名且严格校验', () => {
+  const legacy = { ...DEFAULT_SETTINGS };
+  for (const field of ['annotationFrequency', 'annotationStyle', 'translationStyle', 'siteRules']) delete legacy[field];
+  const config = validateSettings(legacy);
+  assert.equal(config.annotationFrequency, 'all');
+  assert.equal(config.annotationStyle, 'inline');
+  assert.deepEqual(config.siteRules, []);
+  const rule = { host: 'example.com', mode: 'disabled', annotations: false };
+  const configured = validateSettings({ ...config, siteRules: [rule] });
+  assert.equal(sitePolicy(configured, 'example.com').mode, 'disabled');
+  assert.equal(sitePolicy(configured, 'sub.example.com').mode, 'manual');
+  for (const patch of [{ annotationFrequency: 'invalid' }, { annotationStyle: '<script>' }, { translationStyle: 'red;display:none' },
+    { siteRules: [rule, rule] }, { siteRules: [{ ...rule, host: '*.example.com' }] },
+    { siteRules: [{ ...rule, host: 'example.com/path' }] }, { siteRules: [{ ...rule, annotations: 'false' }] }]) {
+    assert.throws(() => validateSettings({ ...config, ...patch }));
+  }
+});
+
+test('阅读模式、字号、行距、颜色兼容旧设置且拒绝 CSS 注入与越界', () => {
+  const legacy = { ...DEFAULT_SETTINGS, translationColor: undefined, translationStyle: 'accent' };
+  assert.equal(validateSettings(legacy).translationColor, 'accent');
+  for (const patch of [{ translationMode: 'invalid' }, { translationFontSize: '1' }, { translationFontSize: 0 },
+    { translationFontSize: Infinity }, { translationLineHeight: 9 }, { translationLineHeight: NaN },
+    { translationColor: 'red;display:none' }]) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
+  assert.equal(validateSettings({ ...DEFAULT_SETTINGS, translationMode: 'translation-only' }).translationMode, 'translation-only');
+});
+
+test('网站级源语言与目标语言覆盖精确保留旧规则，已掌握语言与词条严格校验', () => {
+  const config = validateSettings({ ...DEFAULT_SETTINGS, source: 'auto', target: 'zh-cn',
+    siteRules: [{ host: 'ja.example.com', mode: 'auto', annotations: true, source: 'ja', target: 'en' }] });
+  assert.deepEqual(siteSettings(config, 'ja.example.com'), { ...config, source: 'ja', target: 'en' });
+  assert.equal(siteSettings(config, 'other.example.com').source, 'auto');
+  const legacy = validateSettings({ ...DEFAULT_SETTINGS, siteRules: [{ host: 'example.com', mode: 'auto', annotations: true }] });
+  assert.equal(siteSettings(legacy, 'example.com').source, 'auto');
+  assert.equal(validateSettings({ ...DEFAULT_SETTINGS, knownLanguages: ['en', 'en', 'zh-CN'] }).knownLanguages.length, 2);
+  assert.equal(validateSettings({ ...DEFAULT_SETTINGS, knownLanguages: ['en'] }).knownLanguages[0], 'en');
+  for (const patch of [{ knownLanguages: 'en' }, { knownLanguages: ['auto'] }, { knownLanguages: Array(31).fill('en') },
+    { masteredDisplay: 'dimmed' }, { siteRules: [{ host: 'example.com', mode: 'auto', annotations: true, source: '<invalid>' }] },
+    { siteRules: [{ host: 'example.com', mode: 'auto', annotations: true, target: 'auto' }] }]) {
+    assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
+  }
+  assert.equal(validateEntry({ ...sample, mastered: true }).mastered, true);
+  assert.throws(() => validateEntry({ ...sample, mastered: 'true' }));
+});
 
 test('旧设置缺失新开关时默认关闭，拒绝非布尔值', () => {
   const legacy = { ...DEFAULT_SETTINGS };

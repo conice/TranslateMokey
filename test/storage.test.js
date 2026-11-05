@@ -42,10 +42,11 @@ test('重复收藏、覆盖、删除与撤销', () => {
 test('逐词存储避免不同标签页新增互相覆盖', () => {
   const { store, api } = fixture();
   const other = createStore(api);
-  store.saveEntry(entry);
+  store.saveEntry({ ...entry, mastered: true });
   other.saveEntry({ ...entry, term: 'robust' });
   assert.equal(store.entries().length, 2);
   assert.equal(other.entries().length, 2);
+  assert.equal(other.entries().find((word) => word.term === 'art').mastered, true);
 });
 
 test('远端变更通知与未知版本保护', () => {

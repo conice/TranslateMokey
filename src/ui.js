@@ -1,9 +1,11 @@
-import { INDEX_PRESET, completionEndpoint, entryId, exportBackup, parseBackup, validateSettings } from './core.js';
+import { INDEX_PRESET, completionEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
-import { translate } from './service.js';
+import { createTranslationQueue } from './queue.js';
+import { createReader } from './reader.js';
 
 export function mountUI({ document, store, request, annotator, registerMenu }) {
   const window = document.defaultView;
+  const queue = createTranslationQueue(request);
   const host = document.createElement('div');
   host.dataset.tmHost = '';
   host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;';
@@ -150,11 +152,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', 'TranslateMokey');
   const header = element('header');
-  header.append(element('strong', 'TranslateMokey · 0.1.2'), button('关闭', close));
+  header.append(element('strong', 'TranslateMokey · 0.2.0'), button('关闭', close));
   const nav = element('nav');
   nav.setAttribute('aria-label', '功能');
   const pages = new Map();
-  for (const [name, title] of [['translate', '翻译'], ['words', '生词本'], ['settings', '设置']]) {
+  for (const [name, title] of [['translate', '翻译'], ['reading', '网页阅读'], ['words', '生词本'], ['settings', '设置']]) {
     nav.append(button(title, () => open(name)));
     pages.set(name, element('section'));
     pages.get(name).setAttribute('aria-label', title);
@@ -240,8 +242,8 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const original = field(translationPage, '原文（选区或手动粘贴，上限 10000 字符）', true, 10000);
   const source = field(translationPage, '源语言（auto 或语言代码）', false, 35);
   const target = field(translationPage, '目标语言代码', false, 35);
-  source.value = settings.source;
-  target.value = settings.target;
+  source.value = siteSettings(settings, window.location?.hostname).source;
+  target.value = siteSettings(settings, window.location?.hostname).target;
   const actions = element('div', '', 'row');
   const send = button('翻译 / 重试', startTranslation);
   async function startTranslation() {
@@ -250,6 +252,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     translated = undefined;
     meaning.value = '';
     const config = validateSettings({ ...store.settings(), source: source.value.trim(), target: target.value.trim() });
+    if (sitePolicy(config, window.location?.hostname).mode === 'disabled') throw new Error('此网站已禁用翻译');
     const text = original.value.trim();
     if (!text || text.length > 10000) throw new Error('请提供 1–10000 字符的原文');
     if (config.source === config.target) throw new Error('源语言与目标语言相同，无须翻译');
@@ -260,7 +263,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     const current = serial;
     const context = { title: document.title.slice(0, 500), url: window.location.origin + window.location.pathname };
-    activeTask = translate(request, config, store.key(endpoint), text);
+    activeTask = queue.enqueue(config, store.key(endpoint), text, true);
     log('translation-request', { length: text.length, source: config.source, target: config.target, hiddenFeePopup: config.hideFeePopup });
     send.disabled = true;
     report(`翻译中… 接收方：${endpoint}；模型：${config.model}；${text.length} 字符，可能产生服务费用。`);
@@ -300,6 +303,25 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     meaning.value = '';
   });
 
+  const readingPage = pages.get('reading');
+  const readingStatus = element('p', '尚未开启网页翻译', 'status');
+  readingStatus.setAttribute('role', 'status');
+  const reader = createReader({ document, queue, key: (endpoint) => store.key(endpoint),
+    onStatus: (message) => { readingStatus.textContent = message; } });
+  function startReading(automatic = false, paragraphsOnly = false) {
+    const config = siteSettings(store.settings(), window.location?.hostname);
+    const policy = sitePolicy(config, window.location?.hostname);
+    if (policy.mode === 'disabled') throw new Error('此网站已禁用翻译');
+    const endpoint = completionEndpoint(config.endpoint);
+    if (!automatic && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} ${paragraphsOnly ? '发送你点击翻译按钮的段落正文' : '持续发送当前可见正文、滚动后出现及动态加载的正文'}，可能产生多次请求和费用。不发送 URL、输入框或代码。\n是否开启网页阅读？`)) return;
+    reader.start(config, { automatic: !paragraphsOnly });
+  }
+  readingPage.append(element('p', '按设置选择双语或仅译文模式；仅发送进入可见区域的正文，动态内容继续处理。网页阅读始终单独确认，不受“关闭弹窗”影响。SPA 地址变化后停止，需重新开启。每段提供翻译和重新翻译按钮。', 'hint'),
+    button('开启双语阅读', () => startReading()), button('仅启用逐段翻译', () => startReading(false, true)),
+    button('切换双语显示', () => reader.setMode('bilingual')), button('切换仅译文', () => reader.setMode('translation-only')),
+    button('暂停网页翻译', () => reader.pause()),
+    button('继续网页翻译', () => reader.resume()), button('重试失败段落', () => reader.retry()),
+    button('恢复原文', () => { reader.stop(); readingStatus.textContent = '已取消网页任务并恢复原文'; }), readingStatus);
   const wordsPage = pages.get('words');
   const search = field(wordsPage, '搜索原词或释义', false, 200);
   const wordActions = element('div', '', 'row');
@@ -352,7 +374,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       if (entry.example) item.append(element('p', `例句：${entry.example}`));
       if (entry.note) item.append(element('p', `备注：${entry.note}`));
       if (entry.title || entry.url) item.append(element('p', `${entry.title}\n${entry.url}`, 'hint'));
-      item.append(button('编辑', () => {
+      item.append(button(entry.mastered ? '标记为未掌握' : '标记为已掌握', () => {
+        store.saveEntry({ ...entry, mastered: !entry.mastered }, true);
+        renderWords();
+        refreshAnnotations();
+      }), button('编辑', () => {
         const editor = element('div');
         const definition = field(editor, '释义', true, 2000);
         const sample = field(editor, '例句', true, 2000);
@@ -402,20 +428,48 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   popupInput.style.width = 'auto';
   popupLabel.prepend(popupInput);
   settingsPage.append(autoLabel, popupLabel, element('p', '两个选项默认关闭。仅选中文字不会发送请求；同时勾选后，点击翻译选区会打开面板并直接发送选中文本，可能产生费用。关闭弹窗不代表免费，不影响删除或覆盖确认。', 'hint'));
-  const annotationLabel = element('label', '开启本地词后释义（区分大小写，切换页面或新内容可手动刷新）');
+  const annotationLabel = element('label', '开启本地词后释义（区分大小写，动态内容自动刷新）');
   const annotationInput = element('input');
   annotationInput.type = 'checkbox';
   annotationInput.style.width = 'auto';
   annotationLabel.prepend(annotationInput);
   settingsPage.append(annotationLabel);
+  function choice(title, options) {
+    const label = element('label', title);
+    const select = element('select');
+    for (const [value, title] of options) {
+      const option = element('option', title);
+      option.value = value;
+      select.append(option);
+    }
+    label.append(select);
+    settingsPage.append(label);
+    return select;
+  }
+  const frequencyInput = choice('标注频率', [['all', '每次出现'], ['page', '每页首次'], ['paragraph', '每段首次']]);
+  const annotationStyleInput = choice('标注样式', [['inline', '词后释义'], ['compact', '点击展开释义'], ['underline', '下划线与词义卡片'], ['highlight', '仅高亮（点击查看）']]);
+  const translationModeInput = choice('网页阅读模式', [['bilingual', '双语显示'], ['translation-only', '仅显示译文']]);
+  const translationFontSizeInput = choice('译文字号', [['0.85', '小（85%）'], ['1', '标准（100%）'], ['1.15', '大（115%）'], ['1.3', '特大（130%）']]);
+  const translationLineHeightInput = choice('译文行距', [['1.4', '紧凑'], ['1.7', '标准'], ['2.1', '宽松'], ['2.5', '特宽']]);
+  const translationColorInput = choice('译文颜色', [['inherit', '跟随网页'], ['muted', '柔和灰'], ['accent', '绿色']]);
+  const masteredDisplayInput = choice('已掌握词标注', [['hide', '隐藏'], ['dim', '淡化'], ['show', '正常显示']]);
+  const knownLanguagesInput = field(settingsPage, '已掌握语言（逗号分隔；只跳过明确指定的源语言，不猜测 auto）', false, 1100);
+  const siteModeInput = choice('当前域名翻译规则（精确匹配，不含子域名）', [['manual', '手动翻译'], ['auto', '自动双语阅读'], ['disabled', '禁用翻译']]);
+  const siteSourceInput = field(settingsPage, '当前网站源语言（留空跟随默认）', false, 35);
+  const siteTargetInput = field(settingsPage, '当前网站目标语言（留空跟随默认）', false, 35);
+  const siteAnnotationLabel = element('label', '允许当前网站显示生词标注');
+  const siteAnnotationInput = element('input');
+  siteAnnotationInput.type = 'checkbox';
+  siteAnnotationLabel.prepend(siteAnnotationInput);
+  settingsPage.append(siteAnnotationLabel, element('p', '网站规则仅匹配当前域名。自动阅读需额外确认授权；保存后下次加载此网站时生效。禁用翻译也会关闭网站标注。', 'hint'));
   const keyStatus = element('p', '', 'hint');
   function exportDiagnostics() {
     recordLayout('export-layout');
     log('diagnostics-export');
     const combined = [...store.logs(), ...recentLogs];
     const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
-    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.1.2',
-      build: 'selection-diagnostics-2', exportedAt: new Date().toISOString(),
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.2.0',
+      build: 'web-reading', exportedAt: new Date().toISOString(),
       logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
     diagnosticPreview.value = output;
     diagnosticPreview.parentElement.hidden = false;
@@ -448,25 +502,45 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (key === null) return;
     if (!key.trim() && !window.confirm('确认清除此服务地址保存的 API Key？')) return;
     store.saveKey(endpoint, key);
+    cancel();
+    reader.stop();
+    queue.clearCache();
     updateKeyStatus();
     report('凭据已更新，不会加入备份。');
   }), button('保存设置', () => {
     let extra;
     try { extra = JSON.parse(extraInput.value); } catch { throw new Error('附加参数不是有效 JSON'); }
+    const previous = store.settings();
+    const hostname = window.location?.hostname;
+    const siteRules = previous.siteRules.filter((rule) => rule.host !== hostname);
+    if (hostname && (siteModeInput.value !== 'manual' || !siteAnnotationInput.checked || siteSourceInput.value.trim() || siteTargetInput.value.trim())) {
+      siteRules.push({ host: hostname, mode: siteModeInput.value, annotations: siteAnnotationInput.checked,
+        source: siteSourceInput.value.trim(), target: siteTargetInput.value.trim() });
+    }
     const next = validateSettings({ endpoint: endpointInput.value, model: modelInput.value, extra,
       source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
-      autoTranslate: autoInput.checked, hideFeePopup: popupInput.checked });
+      autoTranslate: autoInput.checked, hideFeePopup: popupInput.checked,
+      annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
+      translationStyle: 'muted', translationMode: translationModeInput.value,
+      translationFontSize: Number(translationFontSizeInput.value), translationLineHeight: Number(translationLineHeightInput.value),
+      translationColor: translationColorInput.value, masteredDisplay: masteredDisplayInput.value,
+      knownLanguages: knownLanguagesInput.value.split(',').map((value) => value.trim()).filter(Boolean), siteRules });
+    const automaticHosts = next.siteRules.filter((rule) => rule.mode === 'auto').map((rule) => rule.host);
+    if (automaticHosts.length && !window.confirm(`授权以下域名下次加载时自动发送可见及动态正文：${automaticHosts.join('、')}\n接收方 ${completionEndpoint(next.endpoint)}，模型 ${next.model}，可能持续产生费用。授权使用本次保存的服务与语言设置，是否继续？`)) return;
     store.saveSettings(next);
     settings = next;
     log('settings-saved', { autoTranslate: next.autoTranslate, hideFeePopup: next.hideFeePopup });
     cancel();
+    reader.stop();
+    queue.clearCache();
+    readingStatus.textContent = '设置已变化，网页阅读已停止；自动规则下次加载生效';
     translated = undefined;
-    source.value = settings.source;
-    target.value = settings.target;
+    source.value = siteSettings(settings, hostname).source;
+    target.value = siteSettings(settings, hostname).target;
     refreshAnnotations();
     report('设置已保存；未发送网络请求。');
   }), button('刷新网页标注', () => { refreshAnnotations(); report('已安排本地标注扫描'); }));
-  settingsPage.append(element('p', '仅匹配单个文本节点内完整词/短语，跳过代码和编辑区域；CJK 连续文本分词、跨标签短语及动态页面自动扫描不在此版本。auto 词条表示源语言未确认。', 'hint'));
+  settingsPage.append(element('p', '仅匹配单个文本节点内完整词/短语，跳过代码、编辑区域和译文；支持动态刷新，不支持 CJK 分词或跨标签短语。auto 词条表示源语言未确认。', 'hint'));
   settingsPage.append(element('p', '诊断日志最多保留 300 条，记录事件、长度、开关与面板尺寸，不含原文、译文、URL、密钥或错误正文；仅本地保存，不自动上传。', 'hint'));
   const diagnosticPreview = field(settingsPage, '诊断日志（下载失败时可全选复制）', true, 500000);
   diagnosticPreview.readOnly = true;
@@ -486,9 +560,26 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     annotationInput.checked = settings.annotations;
     autoInput.checked = settings.autoTranslate;
     popupInput.checked = settings.hideFeePopup;
+    frequencyInput.value = settings.annotationFrequency;
+    annotationStyleInput.value = settings.annotationStyle;
+    translationModeInput.value = settings.translationMode;
+    translationFontSizeInput.value = String(settings.translationFontSize);
+    translationLineHeightInput.value = String(settings.translationLineHeight);
+    translationColorInput.value = settings.translationColor;
+    masteredDisplayInput.value = settings.masteredDisplay;
+    knownLanguagesInput.value = settings.knownLanguages.join(', ');
+    const policy = sitePolicy(settings, window.location?.hostname);
+    siteModeInput.value = policy.mode;
+    siteAnnotationInput.checked = policy.annotations;
+    siteSourceInput.value = policy.source || '';
+    siteTargetInput.value = policy.target || '';
     updateKeyStatus();
   }
-  function refreshAnnotations() { annotator.refresh(store.entries(), store.settings()); }
+  function refreshAnnotations() {
+    const config = siteSettings(store.settings(), window.location?.hostname);
+    const policy = sitePolicy(config, window.location?.hostname);
+    annotator.refresh(store.entries(), { ...config, annotations: config.annotations && policy.annotations && policy.mode !== 'disabled' });
+  }
   function queueSelection(gesture = false, eventType = 'selectionchange') {
     selectionGesture ||= gesture;
     log('selection-event', { type: eventType, gesture, panelHidden: panel.hidden, ...activeElementInfo() });
@@ -536,17 +627,21 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   store.subscribe(() => {
     try {
       cancel();
+      reader.stop();
+      queue.clearCache();
+      readingStatus.textContent = '其他标签页数据已变化，网页阅读已停止';
       translated = undefined;
       refreshAnnotations();
       if (!pages.get('words').hidden) renderWords();
       report('其他标签页的数据已变化；下次翻译使用最新服务设置，语言仍以当前输入框为准。');
     } catch (error) { report(error); }
   });
-  window.addEventListener('pagehide', () => { clearTimeout(selectionTimer); selectionGesture = false; cancel(); annotator.clear(); });
+  window.addEventListener('pagehide', () => { clearTimeout(selectionTimer); selectionGesture = false; cancel(); reader.stop(); queue.clearCache(); annotator.clear(); });
   window.addEventListener('pageshow', (event) => { if (event.persisted) refreshAnnotations(); });
   for (const page of pages.values()) page.hidden = true;
   loadSettings();
   refreshAnnotations();
+  if (sitePolicy(settings, window.location?.hostname).mode === 'auto') startReading(true);
   log('ready', { autoTranslate: settings.autoTranslate, hideFeePopup: settings.hideFeePopup,
     pointerEvents: typeof window.PointerEvent === 'function', touchPoints: window.navigator?.maxTouchPoints || 0,
     dynamicViewportUnits: Boolean(window.CSS?.supports?.('height', '100dvh')) });
