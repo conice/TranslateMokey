@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TranslateMokey
 // @namespace    TranslateMokey
-// @version      0.1.1
-// @description  划词翻译、生词本与本地词后释义；可选划词自动翻译与费用提示开关
+// @version      0.1.2
+// @description  划词翻译、生词本与本地词后释义；可选点击选区入口后自动翻译与费用提示开关
 // @match        https://*/*
 // @match        http://*/*
 // @run-at       document-idle

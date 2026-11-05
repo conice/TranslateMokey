@@ -35,12 +35,40 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const status = element('p', '', 'status');
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
-  function report(error) { status.textContent = error instanceof Error ? error.message : String(error); }
+  const session = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const recentLogs = [];
+  function log(event, details = {}) {
+    const safe = {};
+    for (const [key, value] of Object.entries(details)) {
+      if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) safe[key] = value;
+      else if (typeof value === 'string') safe[key] = value.slice(0, 160);
+    }
+    const entry = { at: new Date().toISOString(), session, event, ...safe };
+    recentLogs.push(entry);
+    if (recentLogs.length > 300) recentLogs.shift();
+    store.appendLog(entry);
+  }
+  function report(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    status.textContent = message;
+    if (error instanceof Error) log('error', { type: errorType(error) });
+  }
+  function errorType(error) {
+    return ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'SecurityError', 'InvalidStateError', 'NotAllowedError'].includes(error?.name) ? error.name : 'OtherError';
+  }
+  function activeElementInfo() {
+    const active = root.activeElement;
+    return { focus: !active ? 'none' : active === launcher ? 'launcher' : 'panel' };
+  }
   function button(text, action) {
     const node = element('button', text);
     node.type = 'button';
     node.addEventListener('click', (event) => {
-      if (!event.isTrusted) return;
+      log('button-click', { button: text, trusted: Boolean(event.isTrusted), panelHidden: panel?.hidden ?? true, ...activeElementInfo() });
+      if (!event.isTrusted) {
+        log('button-rejected', { button: text, reason: 'untrusted-event' });
+        return;
+      }
       Promise.resolve().then(action).catch(report);
     });
     return node;
@@ -62,16 +90,57 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   let selectionText = '';
   let selectionTimer;
   let selectionGesture = false;
-  let lastAutoText = '';
-  const launcher = button('译', () => {
-    open('translate');
-    if (selectionText) {
+  let selectionSnapshot = '';
+  let suppressLauncherClickUntil = 0;
+  let launcherPointer;
+  function activateLauncher(source = 'click') {
+    const now = Date.now();
+    if (source === 'click' && now < suppressLauncherClickUntil) {
+      log('launcher-activation-skipped', { source, reason: 'duplicate' });
+      return;
+    }
+    if (source === 'pointerup') suppressLauncherClickUntil = now + 700;
+    log('launcher-activate', { source });
+    const currentSelection = readSelectionText();
+    const text = currentSelection || selectionSnapshot || selectionText;
+    selectionSnapshot = '';
+    clearTimeout(selectionTimer);
+    open('translate', !text);
+    if (text) {
       cancel();
-      original.value = selectionText;
+      selectionText = text;
+      original.value = text;
       translated = undefined;
       meaning.value = '';
+      if (store.settings().autoTranslate) startTranslation().catch(report);
     }
-    original.focus();
+    if (!text) original.focus();
+  }
+  const launcher = button('译', () => activateLauncher('click'));
+  launcher.addEventListener('pointerdown', (event) => {
+    log('launcher-pointerdown', { trusted: Boolean(event.isTrusted) });
+    if (!event.isTrusted) return;
+    suppressLauncherClickUntil = 0;
+    launcherPointer = event.pointerType === 'touch' && event.isPrimary !== false
+      ? { id: event.pointerId, x: event.clientX, y: event.clientY } : undefined;
+    clearTimeout(selectionTimer);
+    selectionSnapshot = readSelectionText() || selectionText;
+    log('launcher-snapshot', { length: selectionSnapshot.length });
+  });
+  launcher.addEventListener('pointermove', (event) => {
+    if (launcherPointer && event.pointerId === launcherPointer.id
+      && Math.hypot(event.clientX - launcherPointer.x, event.clientY - launcherPointer.y) > 10) {
+      launcherPointer = undefined;
+      selectionSnapshot = '';
+    }
+  });
+  launcher.addEventListener('pointercancel', () => { log('launcher-pointercancel'); launcherPointer = undefined; selectionSnapshot = ''; });
+  launcher.addEventListener('pointerup', (event) => {
+    if (!event.isTrusted || !launcherPointer || event.pointerId !== launcherPointer.id) return;
+    const pointer = launcherPointer;
+    launcherPointer = undefined;
+    if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 10) return;
+    Promise.resolve().then(() => activateLauncher('pointerup')).catch(report);
   });
   launcher.className = 'launcher';
   launcher.setAttribute('aria-label', '打开 TranslateMokey，可手动输入翻译');
@@ -81,7 +150,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', 'TranslateMokey');
   const header = element('header');
-  header.append(element('strong', 'TranslateMokey · 0.1.1'), button('关闭', close));
+  header.append(element('strong', 'TranslateMokey · 0.1.2'), button('关闭', close));
   const nav = element('nav');
   nav.setAttribute('aria-label', '功能');
   const pages = new Map();
@@ -99,17 +168,46 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     activeTask?.cancel();
     activeTask = undefined;
     send.disabled = false;
+    log('translation-cancel');
   }
   function close() {
     clearTimeout(selectionTimer);
     selectionGesture = false;
+    selectionSnapshot = '';
     cancel();
     panel.hidden = true;
     launcher.setAttribute('aria-expanded', 'false');
     if (previousFocus?.isConnected) previousFocus.focus();
     else launcher.focus();
+    log('panel-close');
   }
-  function open(name) {
+  function readSelectionText() {
+    try {
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || selection.isCollapsed) {
+        log('selection-read', { result: 'empty', rangeCount: selection?.rangeCount || 0, collapsed: Boolean(selection?.isCollapsed) });
+        return '';
+      }
+      const range = selection.getRangeAt(0);
+      if (isExcluded(range.startContainer) || isExcluded(range.endContainer)) {
+        log('selection-read', { result: 'excluded-boundary' });
+        return '';
+      }
+      const fragment = range.cloneContents();
+      if (fragment?.querySelector?.(EXCLUDED)) {
+        log('selection-read', { result: 'excluded-content' });
+        return '';
+      }
+      const text = selection.toString().trim();
+      const result = text.length <= 10000 ? text : '';
+      log('selection-read', { result: result ? 'ok' : 'empty-or-too-long', length: text.length });
+      return result;
+    } catch (error) {
+      log('selection-read-error', { type: errorType(error) });
+      return '';
+    }
+  }
+  function open(name, focusInput = true) {
     if (panel.hidden) previousFocus = document.activeElement;
     panel.hidden = false;
     launcher.setAttribute('aria-expanded', 'true');
@@ -117,7 +215,21 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (name === 'words') renderWords();
     if (name === 'settings') loadSettings();
     const focusable = pages.get(name).querySelector('input,textarea,button');
-    focusable?.focus();
+    if (focusInput) focusable?.focus();
+    log('panel-open', { page: name, focusInput, panelHidden: panel.hidden });
+    setTimeout(() => recordLayout('panel-layout'), 0);
+  }
+  function recordLayout(event) {
+    try {
+      const bounds = panel.getBoundingClientRect?.();
+      const styles = window.getComputedStyle?.(panel);
+      log(event, { panelHidden: panel.hidden, hostConnected: Boolean(host.isConnected),
+        x: bounds?.x, y: bounds?.y, width: bounds?.width, height: bounds?.height,
+        viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+        visualHeight: window.visualViewport?.height, visualOffsetTop: window.visualViewport?.offsetTop,
+        displayNone: styles?.display === 'none', visibilityHidden: styles?.visibility === 'hidden',
+        transparent: styles?.opacity === '0', ...activeElementInfo() });
+    } catch (error) { log('layout-error', { type: errorType(error) }); }
   }
   panel.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
@@ -133,6 +245,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const actions = element('div', '', 'row');
   const send = button('翻译 / 重试', startTranslation);
   async function startTranslation() {
+    log('translation-start');
     cancel();
     translated = undefined;
     meaning.value = '';
@@ -141,10 +254,14 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (!text || text.length > 10000) throw new Error('请提供 1–10000 字符的原文');
     if (config.source === config.target) throw new Error('源语言与目标语言相同，无须翻译');
     const endpoint = completionEndpoint(config.endpoint);
-    if (!config.hideFeePopup && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} 发送输入框中的 ${text.length} 字符。不会发送整页。可能产生服务费用。\n是否继续？`)) return;
+    if (!config.hideFeePopup && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} 发送输入框中的 ${text.length} 字符。不会发送整页。可能产生服务费用。\n是否继续？`)) {
+      log('translation-confirm-cancel', { length: text.length });
+      return;
+    }
     const current = serial;
     const context = { title: document.title.slice(0, 500), url: window.location.origin + window.location.pathname };
     activeTask = translate(request, config, store.key(endpoint), text);
+    log('translation-request', { length: text.length, source: config.source, target: config.target, hiddenFeePopup: config.hideFeePopup });
     send.disabled = true;
     report(`翻译中… 接收方：${endpoint}；模型：${config.model}；${text.length} 字符，可能产生服务费用。`);
     try {
@@ -153,6 +270,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       meaning.value = result;
       translated = { term: text, source: config.source, target: config.target, ...context };
       report('翻译完成，可修改释义后收藏。');
+      log('translation-success');
     } catch (error) {
       if (serial === current) report(error);
     } finally {
@@ -273,7 +391,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const extraInput = field(settingsPage, '附加参数 JSON（temperature、top_p、max_tokens、max_completion_tokens、enable_thinking）', true, 8000);
   const defaultSource = field(settingsPage, '默认源语言', false, 35);
   const defaultTarget = field(settingsPage, '默认目标语言', false, 35);
-  const autoLabel = element('label', '自动翻译（选中文字后自动发起翻译，不翻译整页）');
+  const autoLabel = element('label', '自动翻译（点击翻译选区打开面板后自动翻译）');
   const autoInput = element('input');
   autoInput.type = 'checkbox';
   autoInput.style.width = 'auto';
@@ -283,7 +401,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   popupInput.type = 'checkbox';
   popupInput.style.width = 'auto';
   popupLabel.prepend(popupInput);
-  settingsPage.append(autoLabel, popupLabel, element('p', '两个选项默认关闭。同时勾选后，选中的正文会直接发送给当前服务，可能产生费用；关闭弹窗不代表免费，不影响删除或覆盖确认。', 'hint'));
+  settingsPage.append(autoLabel, popupLabel, element('p', '两个选项默认关闭。仅选中文字不会发送请求；同时勾选后，点击翻译选区会打开面板并直接发送选中文本，可能产生费用。关闭弹窗不代表免费，不影响删除或覆盖确认。', 'hint'));
   const annotationLabel = element('label', '开启本地词后释义（区分大小写，切换页面或新内容可手动刷新）');
   const annotationInput = element('input');
   annotationInput.type = 'checkbox';
@@ -291,7 +409,35 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   annotationLabel.prepend(annotationInput);
   settingsPage.append(annotationLabel);
   const keyStatus = element('p', '', 'hint');
-  settingsPage.append(keyStatus, button('填入 Index 预设', () => {
+  function exportDiagnostics() {
+    recordLayout('export-layout');
+    log('diagnostics-export');
+    const combined = [...store.logs(), ...recentLogs];
+    const unique = new Map(combined.map((entry) => [JSON.stringify(entry), entry]));
+    const output = JSON.stringify({ format: 'TranslateMokey-diagnostics', version: 1, scriptVersion: '0.1.2',
+      build: 'selection-diagnostics-2', exportedAt: new Date().toISOString(),
+      logs: [...unique.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-300) }, null, 2);
+    diagnosticPreview.value = output;
+    diagnosticPreview.parentElement.hidden = false;
+    const blob = new Blob([output], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = element('a');
+    link.href = url;
+    link.download = 'TranslateMokey-diagnostics.json';
+    root.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    report('已请求下载日志；若无文件，可在设置底部手动复制日志文本。');
+  }
+  settingsPage.append(keyStatus, button('导出诊断日志', exportDiagnostics), button('清空诊断日志', () => {
+    if (!window.confirm('确认清空本地诊断日志？不会删除设置、生词本或 API Key。')) return;
+    store.clearLogs();
+    recentLogs.length = 0;
+    diagnosticPreview.value = '';
+    diagnosticPreview.parentElement.hidden = true;
+    report('诊断日志已清空。');
+  }), button('填入 Index 预设', () => {
     endpointInput.value = INDEX_PRESET.endpoint;
     modelInput.value = INDEX_PRESET.model;
     extraInput.value = JSON.stringify(INDEX_PRESET.extra, null, 2);
@@ -312,6 +458,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       autoTranslate: autoInput.checked, hideFeePopup: popupInput.checked });
     store.saveSettings(next);
     settings = next;
+    log('settings-saved', { autoTranslate: next.autoTranslate, hideFeePopup: next.hideFeePopup });
     cancel();
     translated = undefined;
     source.value = settings.source;
@@ -320,6 +467,10 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     report('设置已保存；未发送网络请求。');
   }), button('刷新网页标注', () => { refreshAnnotations(); report('已安排本地标注扫描'); }));
   settingsPage.append(element('p', '仅匹配单个文本节点内完整词/短语，跳过代码和编辑区域；CJK 连续文本分词、跨标签短语及动态页面自动扫描不在此版本。auto 词条表示源语言未确认。', 'hint'));
+  settingsPage.append(element('p', '诊断日志最多保留 300 条，记录事件、长度、开关与面板尺寸，不含原文、译文、URL、密钥或错误正文；仅本地保存，不自动上传。', 'hint'));
+  const diagnosticPreview = field(settingsPage, '诊断日志（下载失败时可全选复制）', true, 500000);
+  diagnosticPreview.readOnly = true;
+  diagnosticPreview.parentElement.hidden = true;
   function updateKeyStatus() {
     try { keyStatus.textContent = store.key(completionEndpoint(endpointInput.value)) ? '此地址已保存 API Key（不回显）' : '此地址未保存 API Key'; }
     catch { keyStatus.textContent = '请填写有效服务地址'; }
@@ -338,42 +489,49 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     updateKeyStatus();
   }
   function refreshAnnotations() { annotator.refresh(store.entries(), store.settings()); }
-  function queueSelection(gesture = false) {
+  function queueSelection(gesture = false, eventType = 'selectionchange') {
     selectionGesture ||= gesture;
+    log('selection-event', { type: eventType, gesture, panelHidden: panel.hidden, ...activeElementInfo() });
     clearTimeout(selectionTimer);
     selectionTimer = setTimeout(() => {
       const userGesture = selectionGesture;
       selectionGesture = false;
-      if (root.activeElement || (!panel.hidden && pages.get('translate').hidden)) return;
-      const selection = window.getSelection();
-      selectionText = '';
-      if (selection?.rangeCount && !selection.isCollapsed) {
-        const range = selection.getRangeAt(0);
-        if (!isExcluded(range.startContainer) && !isExcluded(range.endContainer)
-          && !range.cloneContents().querySelector(EXCLUDED)) {
-          const text = selection.toString().trim();
-          if (text.length <= 10000) selectionText = text;
-        }
+      const focused = root.activeElement;
+      if ((!panel.hidden && focused && focused !== launcher) || (!panel.hidden && pages.get('translate').hidden)) {
+        log('selection-skip', { reason: 'panel-focus-or-page', panelHidden: panel.hidden, ...activeElementInfo() });
+        return;
+      }
+      const currentSelection = readSelectionText();
+      if (currentSelection) {
+        selectionText = currentSelection;
+      } else if (!focused || focused === launcher) {
+        selectionText = '';
       }
       launcher.textContent = selectionText ? '翻译选区' : '译';
-      if (!selectionText) { lastAutoText = ''; return; }
-      if (!userGesture || selectionText === lastAutoText) return;
-      try {
-        if (!store.settings().autoTranslate) return;
-        lastAutoText = selectionText;
-        original.value = selectionText;
-        open('translate');
-        startTranslation().catch(report);
-      } catch (error) { report(error); }
+      if (selectionText) log('selection-ready', { length: selectionText.length, gesture: userGesture });
     }, 300);
   }
   document.addEventListener('selectionchange', () => queueSelection());
   for (const type of ['pointerup', 'keyup']) {
     document.addEventListener(type, (event) => {
-      if (event.isTrusted && !event.composedPath().includes(host)) queueSelection(true);
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+      const insideHost = path.includes(host) || event.target === host;
+      log('gesture-event', { type, trusted: Boolean(event.isTrusted), insideHost });
+      if (event.isTrusted && !insideHost) queueSelection(true, type);
     });
   }
+  for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'touchstart', 'touchend', 'touchcancel', 'click']) {
+    document.addEventListener(type, (event) => {
+      const insideHost = event.composedPath?.().includes(host) || event.target === host;
+      log('input-capture', { type, trusted: Boolean(event.isTrusted), insideHost: Boolean(insideHost),
+        prevented: Boolean(event.defaultPrevented), panelHidden: panel.hidden });
+    }, { capture: true, passive: true });
+  }
   registerMenu('打开 TranslateMokey', () => open('translate'));
+  registerMenu('导出 TranslateMokey 诊断日志', () => {
+    try { exportDiagnostics(); }
+    catch (error) { report(error); window.alert('日志下载失败，请通过设置底部的诊断日志文本框手动复制。'); }
+  });
   registerMenu('刷新本地生词标注', () => { try { refreshAnnotations(); } catch (error) { report(error); open('settings'); } });
   store.subscribe(() => {
     try {
@@ -389,4 +547,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   for (const page of pages.values()) page.hidden = true;
   loadSettings();
   refreshAnnotations();
+  log('ready', { autoTranslate: settings.autoTranslate, hideFeePopup: settings.hideFeePopup,
+    pointerEvents: typeof window.PointerEvent === 'function', touchPoints: window.navigator?.maxTouchPoints || 0,
+    dynamicViewportUnits: Boolean(window.CSS?.supports?.('height', '100dvh')) });
 }

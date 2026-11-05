@@ -4,6 +4,7 @@ export function createStore(api) {
   const settingsKey = 'tm:settings';
   const wordPrefix = 'tm:word:';
   const signalKey = 'tm:changed';
+  const logKey = 'tm:logs';
   function unpack(record) {
     if (!record || record.version !== SCHEMA_VERSION) throw new Error('本地数据版本不支持，已停止读取；请勿清空原数据');
     return record.value;
@@ -40,6 +41,20 @@ export function createStore(api) {
       if (typeof key !== 'string' || key.length > 4096 || /[\r\n]/.test(key)) throw new Error('API Key 格式无效');
       api.set(`tm:secret:${endpoint}`, key.trim());
     },
+    logs() {
+      const record = api.get(logKey);
+      if (!record || record.version !== SCHEMA_VERSION || !Array.isArray(record.value)) return [];
+      return record.value.slice(-300);
+    },
+    appendLog(value) {
+      try {
+        api.set(logKey, { version: SCHEMA_VERSION, value: [...this.logs(), value].slice(-300) });
+      } catch {
+        return false;
+      }
+      return true;
+    },
+    clearLogs() { api.set(logKey, { version: SCHEMA_VERSION, value: [] }); },
     subscribe(callback) { api.listen(signalKey, (_key, _old, _next, remote) => { if (remote) callback(); }); },
   };
 }

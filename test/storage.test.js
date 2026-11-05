@@ -65,3 +65,23 @@ test('存储失败明确抛出，不伪造成功', () => {
   const store = createStore({ ...api, set() { throw new Error('quota'); } });
   assert.throws(() => store.saveEntry(entry), /quota/);
 });
+
+test('日志限制 300 条，刷新可读取，清空不影响词条及设置', () => {
+  const { store, api } = fixture();
+  store.saveEntry(entry);
+  store.saveSettings(DEFAULT_SETTINGS);
+  for (let index = 0; index < 305; index += 1) store.appendLog({ event: 'test', index });
+  assert.equal(store.logs().length, 300);
+  assert.equal(store.logs()[0].index, 5);
+  assert.equal(createStore(api).logs().length, 300);
+  store.clearLogs();
+  assert.deepEqual(store.logs(), []);
+  assert.equal(store.entries().length, 1);
+  assert.equal(store.settings().model, DEFAULT_SETTINGS.model);
+});
+
+test('日志写入失败返回失败，不阻断交互', () => {
+  const { api } = fixture();
+  const store = createStore({ ...api, set() { throw new Error('quota'); } });
+  assert.equal(store.appendLog({ event: 'test' }), false);
+});
