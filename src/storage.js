@@ -1,6 +1,6 @@
-import { DEFAULT_SETTINGS, SCHEMA_VERSION, entryId, validateEntry, validateSettings } from './core.js';
+import { BUILTIN_API_ID, DEFAULT_SETTINGS, SCHEMA_VERSION, entryId, validateEntry, validateSettings } from './core.js';
 import { gradeEntry } from './review.js';
-import { DEFAULT_DICTIONARY, validateDictionary } from './dictionary.js';
+import { BUILTIN_DICTIONARY_ID, resolveDictionaryStore, validateDictionary, validateDictionaryProfile, validateDictionaryStore } from './dictionary.js';
 
 export function createStore(api) {
   const settingsKey = 'tm:settings';
@@ -21,6 +21,10 @@ export function createStore(api) {
       return value === null ? [] : [validateEntry(value)];
     }).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
+  function dictionaryState() {
+    const record = api.get('tm:dictionary');
+    return validateDictionaryStore(record === undefined ? undefined : unpack(record));
+  }
   return {
     settings() {
       const record = api.get(settingsKey);
@@ -28,10 +32,35 @@ export function createStore(api) {
     },
     saveSettings(value) { write(settingsKey, validateSettings(value)); },
     dictionary() {
-      const record = api.get('tm:dictionary');
-      return validateDictionary(record === undefined ? DEFAULT_DICTIONARY : unpack(record));
+      return resolveDictionaryStore(dictionaryState());
     },
-    saveDictionary(value) { write('tm:dictionary', validateDictionary(value)); },
+    dictionaryState,
+    dictionaryProfiles() { return dictionaryState().profiles; },
+    selectedDictionaryId() { return dictionaryState().selectedId; },
+    saveDictionaryProfile(value) {
+      const profile = validateDictionaryProfile(value);
+      const state = dictionaryState();
+      const profiles = [...state.profiles.filter((item) => item.id !== profile.id), profile];
+      const next = validateDictionaryStore({ selectedId: profile.id, profiles });
+      write('tm:dictionary', next);
+      return profile;
+    },
+    selectDictionary(id) {
+      const state = dictionaryState();
+      const selectedId = typeof id === 'string' ? id : '';
+      if (selectedId !== BUILTIN_DICTIONARY_ID && !state.profiles.some((profile) => profile.id === selectedId)) throw new Error('所选词典不存在');
+      write('tm:dictionary', { selectedId, profiles: state.profiles });
+    },
+    deleteDictionaryProfile(id) {
+      const state = dictionaryState();
+      const profiles = state.profiles.filter((profile) => profile.id !== id);
+      write('tm:dictionary', { selectedId: state.selectedId === id ? BUILTIN_DICTIONARY_ID : state.selectedId, profiles });
+    },
+    saveDictionary(value) {
+      const config = validateDictionary(value);
+      if (config.mode === 'bing') return this.selectDictionary(BUILTIN_DICTIONARY_ID);
+      return this.saveDictionaryProfile({ id: 'legacy:dictionary', name: '自定义词典', ...config });
+    },
     entries,
     saveEntry(value, overwrite = false) {
       const entry = validateEntry(value);
@@ -54,10 +83,18 @@ export function createStore(api) {
       write(key, updated);
       return updated;
     },
-    key(endpoint) { return api.get(`tm:secret:${endpoint}`, ''); },
-    saveKey(endpoint, key) {
+    key(id, endpoint = '') {
+      if (typeof id !== 'string' || !id) return '';
+      if (id === BUILTIN_API_ID) return '';
+      const saved = api.get(`tm:secret:api:${id}`, undefined);
+      if (typeof saved === 'string') return saved;
+      return endpoint ? api.get(`tm:secret:${endpoint}`, '') : '';
+    },
+    saveKey(id, key) {
+      if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,79}$/.test(id)) throw new Error('API 标识无效');
+      if (id === BUILTIN_API_ID) throw new Error('内置 API 凭据不可修改');
       if (typeof key !== 'string' || key.length > 4096 || /[\r\n]/.test(key)) throw new Error('API Key 格式无效');
-      api.set(`tm:secret:${endpoint}`, key.trim());
+      api.set(`tm:secret:api:${id}`, key.trim());
     },
     logs() {
       const record = api.get(logKey);

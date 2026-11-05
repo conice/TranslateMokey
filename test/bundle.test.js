@@ -45,7 +45,7 @@ function environment() {
   const document = { createElement, createElementNS: (namespace, tag) => createElement(tag), defaultView: window, documentElement: createElement('html'), title: 'Test',
     addEventListener(type, handler, options) { (options?.capture ? captureEvents : documentEvents).set(type, handler); } };
   const context = {
-    window, document, URL, Blob, TextEncoder, setTimeout, clearTimeout,
+    window, document, URL, Blob, TextEncoder, setTimeout, clearTimeout, setInterval, clearInterval,
     GM_getValue: (key, fallback) => initialValues.get(key) ?? fallback,
     GM_setValue(key, value) { assert.equal(key, 'tm:logs'); initialValues.set(key, value); },
     GM_listValues: () => [],
@@ -373,8 +373,10 @@ function translationApp(options = {}, allowConfirm = true, handleRequest) {
   app.context.GM_xmlhttpRequest = (request) => {
     requests.push(request);
     if (handleRequest) return handleRequest(request);
-    request.onload({ status: 200, responseText: request.method === 'GET'
-      ? '{"meaning":"<img onerror=alert(1)>","phonetic":"/test/"}' : '{"choices":[{"message":{"content":"稳健的"}}]}' });
+    const body = request.method === 'POST' ? '{"choices":[{"message":{"content":"稳健的"}}]}'
+      : /\/models$/.test(request.url) ? '{"data":[{"id":"model-one"},{"id":"model-two"}]}'
+        : '{"meaning":"<img onerror=alert(1)>","phonetic":"/test/"}';
+    request.onload({ status: 200, responseText: body });
     return { abort() {} };
   };
   app.context.window.location = { origin: 'https://example.com', hostname: 'example.com', pathname: '/', href: 'https://example.com/' };
@@ -409,19 +411,29 @@ function translationApp(options = {}, allowConfirm = true, handleRequest) {
   return { ...app, requests, confirmations, click, change, select, values, exclude() { excluded = true; }, failStorage() { failStorage = true; } };
 }
 
-test('词典默认微软；取消确认或禁用网站不请求，配置保存不执行 JS', async () => {
+test('词典默认内置只读脱敏；取消确认或禁用网站不请求，自定义配置保存不执行 JS', async () => {
   const app = translationApp({}, false);
+  const summary = app.nodes.find((node) => node.tag === 'p' && node.textContent.startsWith('内置词典'));
+  assert.ok(summary);
+  assert.ok(!summary.textContent.includes('cn.bing.com'));
+  assert.equal(app.nodes.find((node) => node.textContent === '编辑当前词典').hidden, true);
+  assert.equal(app.nodes.find((node) => node.textContent === '删除当前词典').hidden, true);
   await app.click('词典');
   app.nodes.find((node) => node.textContent === '原文（选区或手动粘贴，上限 10000 字符）').children[0].value = 'hello';
   await app.click('查询');
   assert.equal(app.requests.length, 0);
-  assert.match(app.confirmations[0], /cn\.bing\.com/);
-  const mode = app.nodes.find((node) => node.textContent === '词典类型').children[0];
-  mode.value = 'javascript';
-  app.nodes.find((node) => node.textContent?.startsWith('词典 JS 函数体')).children[0].value = 'throw new Error("must not run")';
-  await app.change(mode);
-  assert.equal(app.values.has('tm:dictionary'), false);
+  assert.match(app.confirmations[0], /微软 Bing 词典（内置）/);
+  assert.ok(!app.confirmations[0].includes('cn.bing.com'));
+  await app.click('添加词典');
+  app.nodes.find((node) => node.textContent === '词典名称').children[0].value = '本地测试词典';
+  app.nodes.find((node) => node.textContent?.startsWith('词典 HTTPS URL')).children[0].value = 'https://dictionary.example/?q={term}';
+  await app.click('保存词典');
+  const dictionaryState = app.values.get('tm:dictionary').value;
+  assert.equal(dictionaryState.profiles[0].name, '本地测试词典');
+  assert.equal(dictionaryState.profiles[0].url, 'https://dictionary.example/?q={term}');
+  assert.equal(dictionaryState.selectedId, dictionaryState.profiles[0].id);
   assert.equal(app.requests.length, 0);
+  assert.ok(!app.nodes.some((node) => node.textContent?.includes('throw new Error("must not run")')));
   const disabled = translationApp({ siteRules: [{ host: 'example.com', mode: 'disabled', annotations: false }] });
   await disabled.click('词典');
   disabled.nodes.find((node) => node.textContent === '原文（选区或手动粘贴，上限 10000 字符）').children[0].value = 'hello';
@@ -659,21 +671,121 @@ test('自定义 JSON 词典展示纯文本并可独立收藏；输入改变清�
   assert.ok(app.nodes.some((node) => node.textContent === '请先完成当前来源查询'));
 });
 
-test('新协议设置保存回显，使用协议端点保存独立凭据且不请求', async () => {
-  const app = translationApp();
-  const protocol = app.nodes.find((node) => node.textContent === '翻译服务协议').children[0];
-  protocol.value = 'gemini';
-  app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'https://example.com/v1beta';
-  app.nodes.find((node) => node.textContent === '模型').children[0].value = 'test-model';
-  app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0].value = '{}';
-  await app.change(protocol);
-  assert.equal(app.values.get('tm:settings').value.protocol, 'gemini');
-  app.context.window.prompt = () => 'test-key';
-  await app.click('设置 / 清除 API Key');
-  assert.equal(app.values.get('tm:secret:https://example.com/v1beta/models/test-model:generateContent'), 'test-key');
+test('默认 API 只读脱敏；可添加多个自定义 API、拉取模型并独立保存 Key', async () => {
+  const app = translationApp({ hideFeePopup: true });
   await app.click('设置');
-  assert.equal(protocol.value, 'gemini');
-  assert.equal(app.requests.length, 0);
+  const builtInSummary = app.nodes.find((node) => node.tag === 'p' && node.textContent.startsWith('内置配置'));
+  assert.ok(builtInSummary);
+  assert.ok(!builtInSummary.textContent.includes('index-translate.bilibili.com'));
+  assert.ok(!builtInSummary.textContent.includes('index-mt-9b'));
+  assert.equal(app.nodes.find((node) => node.textContent === '编辑当前 API').hidden, true);
+  assert.equal(app.nodes.find((node) => node.textContent === '删除当前 API').hidden, true);
+
+  await app.click('添加 API');
+  app.nodes.find((node) => node.textContent === 'API 名称').children[0].value = '第一个 API';
+  app.nodes.find((node) => node.textContent === '翻译服务协议').children[0].value = 'openai';
+  app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'https://first.example/v1';
+  app.nodes.find((node) => node.textContent?.startsWith('API Key')).children[0].value = 'first-key';
+  app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0].value = '{}';
+  await app.click('拉取模型');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].method, 'GET');
+  assert.equal(app.requests[0].url, 'https://first.example/v1/models');
+  assert.equal(app.requests[0].headers.Authorization, 'Bearer first-key');
+  const firstModel = app.nodes.find((node) => node.textContent === '模型（拉取后选择）').children[0];
+  assert.deepEqual(firstModel.children.map((node) => node.value), ['', 'model-one', 'model-two', '__manual__']);
+  firstModel.value = 'model-one';
+  assert.equal(app.nodes.find((node) => node.textContent?.startsWith('API Key')).children[0].value, 'first-key');
+  await app.click('保存并启用');
+  let saved = app.values.get('tm:settings').value;
+  assert.equal(saved.apiProfiles.length, 1);
+  assert.equal(saved.apiProfiles[0].name, '第一个 API');
+  assert.equal(saved.apiProfiles[0].model, 'model-one');
+  assert.equal(saved.selectedApiId, saved.apiProfiles[0].id);
+  const firstId = saved.apiProfiles[0].id;
+  assert.equal(app.values.get('tm:secret:api:' + firstId), 'first-key');
+  const firstSummary = app.nodes.find((node) => node.tag === 'p' && node.textContent.startsWith('已选：第一个 API'));
+  assert.ok(firstSummary);
+  assert.ok(!firstSummary.textContent.includes('first.example'));
+  assert.ok(!firstSummary.textContent.includes('model-one'));
+  assert.ok(!firstSummary.textContent.includes('first-key'));
+
+  await app.click('添加 API');
+  app.nodes.find((node) => node.textContent === 'API 名称').children[0].value = '第二个 API';
+  app.nodes.find((node) => node.textContent?.startsWith('HTTPS 服务地址')).children[0].value = 'https://second.example/v1';
+  app.nodes.find((node) => node.textContent?.startsWith('API Key')).children[0].value = 'second-key';
+  app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0].value = '{}';
+  const secondModel = app.nodes.find((node) => node.textContent === '模型（拉取后选择）').children[0];
+  secondModel.value = '__manual__';
+  app.events.get(`${app.nodes.indexOf(secondModel)}:change`)();
+  app.nodes.find((node) => node.textContent?.startsWith('模型（手动填写兜底）')).children[0].value = 'second-model';
+  await app.click('保存并启用');
+  saved = app.values.get('tm:settings').value;
+  assert.equal(saved.apiProfiles.length, 2);
+  const secondId = saved.apiProfiles.find((profile) => profile.name === '第二个 API').id;
+  assert.equal(app.values.get('tm:secret:api:' + firstId), 'first-key');
+  assert.equal(app.values.get('tm:secret:api:' + secondId), 'second-key');
+
+  const apiSelect = app.nodes.find((node) => node.textContent === '当前 API').children[0];
+  apiSelect.value = firstId;
+  await app.change(apiSelect);
+  assert.equal(app.values.get('tm:settings').value.selectedApiId, firstId);
+  await app.click('文本');
+  await app.select('hello');
+  await app.click('翻译选区');
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.requests[1].method, 'POST');
+  assert.equal(app.requests[1].url, 'https://first.example/v1/chat/completions');
+  assert.equal(app.requests[1].headers.Authorization, 'Bearer first-key');
+
+  apiSelect.value = secondId;
+  await app.change(apiSelect);
+  await app.click('编辑当前 API');
+  assert.equal(app.nodes.find((node) => node.textContent?.startsWith('API Key')).children[0].value, '');
+  assert.ok(app.nodes.some((node) => node.textContent === '此 API 已保存 Key（不回显）。'));
+  await app.click('取消');
+  await app.click('删除当前 API');
+  saved = app.values.get('tm:settings').value;
+  assert.equal(saved.apiProfiles.length, 1);
+  assert.equal(saved.selectedApiId, DEFAULT_SETTINGS.selectedApiId);
+  assert.equal(app.values.get('tm:secret:api:' + secondId), '');
+  assert.equal(app.requests.length, 2);
+});
+
+test('可添加多个词典，切换后查询使用选中词典', async () => {
+  const app = translationApp({ lookupProvider: 'dictionary' });
+  const addDictionary = async (name, url) => {
+    await app.click('添加词典');
+    app.nodes.find((node) => node.textContent === '词典名称').children[0].value = name;
+    app.nodes.find((node) => node.textContent?.startsWith('词典 HTTPS URL')).children[0].value = url;
+    await app.click('保存词典');
+  };
+  await addDictionary('第一词典', 'https://first-dictionary.example/?q={term}');
+  await addDictionary('第二词典', 'https://second-dictionary.example/?q={term}');
+  const state = app.values.get('tm:dictionary').value;
+  assert.equal(state.profiles.length, 2);
+  const [first, second] = state.profiles;
+  const dictionarySelect = app.nodes.find((node) => node.textContent === '当前词典').children[0];
+
+  dictionarySelect.value = first.id;
+  await app.change(dictionarySelect);
+  assert.equal(app.values.get('tm:dictionary').value.selectedId, first.id);
+  await app.click('词典');
+  const term = app.nodes.find((node) => node.textContent === '原文（选区或手动粘贴，上限 10000 字符）').children[0];
+  term.value = 'hello';
+  await app.click('查询');
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.requests[0].url, 'https://first-dictionary.example/?q=hello');
+
+  dictionarySelect.value = second.id;
+  await app.change(dictionarySelect);
+  assert.equal(app.values.get('tm:dictionary').value.selectedId, second.id);
+  await app.click('查询');
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.requests[1].url, 'https://second-dictionary.example/?q=hello');
+  assert.match(app.confirmations[1], /第二词典/);
+  assert.ok(!app.confirmations[1].includes('second-dictionary.example'));
 });
 
 test('网页阅读确认独立于费用弹窗开关，拒绝授权不请求', async () => {
@@ -886,18 +998,18 @@ test('快捷菜单支持再次点击、外部点击和 Escape 收起，触摸不
   assert.equal(app.requests.length, 0);
 });
 
-test('字号自动保存并立即应用，坏的服务草稿不阻止独立设置保存', async () => {
+test('字号自动保存并立即应用，未保存的坏 API 草稿不阻止独立设置保存', async () => {
   const app = translationApp();
+  await app.click('添加 API');
   const font = app.nodes.find((node) => node.textContent === '译文字号').children[0];
   const extra = app.nodes.find((node) => node.textContent?.startsWith('附加参数 JSON')).children[0];
   extra.value = '{';
-  await app.change(extra);
-  assert.ok(app.nodes.some((node) => node.textContent?.startsWith('未保存：附加参数')));
   font.value = '0.85';
   await app.change(font, false);
   assert.equal(app.values.get('tm:settings').value.translationFontSize, 1);
   await app.change(font);
   assert.equal(app.values.get('tm:settings').value.translationFontSize, 0.85);
+  assert.equal(app.values.get('tm:settings').value.apiProfiles.length, 0);
   const panel = app.nodes.find((node) => node.className === 'panel');
   assert.equal(panel.style['--translation-scale'], '0.85');
   await app.click('设置');

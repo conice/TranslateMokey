@@ -1,9 +1,10 @@
-import { DEFAULT_SETTINGS, INDEX_PRESET, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings, annotationAppearance, translationAppearance } from './core.js';
+import { DEFAULT_SETTINGS, BUILTIN_API_ID, MAX_API_PROFILES, serviceEndpoint, entryId, exportBackup, parseBackup, validateSettings, sitePolicy, siteSettings, annotationAppearance, translationAppearance } from './core.js';
 import { EXCLUDED, isExcluded } from './annotations.js';
 import { createTranslationQueue } from './queue.js';
 import { createReader } from './reader.js';
 import { dueEntries } from './review.js';
-import { DEFAULT_DICTIONARY, dictionaryURL, validateDictionary, lookupDictionary } from './dictionary.js';
+import { BUILTIN_DICTIONARY_ID, MAX_DICTIONARY_PROFILES, lookupDictionary } from './dictionary.js';
+import { listModels } from './service.js';
 import { createSpeech } from './speech.js';
 
 export function mountUI({ document, store, request, annotator, registerMenu }) {
@@ -701,7 +702,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     if (!text || text.length > 10000) throw new Error('请提供 1–10000 字符的原文');
     if (config.source === config.target) throw new Error('源语言与目标语言相同，无须翻译');
     const endpoint = serviceEndpoint(config);
-    if (!config.hideFeePopup && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} 发送输入框中的 ${text.length} 字符。不会发送整页。可能产生服务费用。\n是否继续？`)) {
+    if (!config.hideFeePopup && !window.confirm(`将使用 ${config.apiName} 发送输入框中的 ${text.length} 字符。不会发送整页。可能产生服务费用。\n是否继续？`)) {
       log('translation-confirm-cancel', { length: text.length });
       queryMessages.ai = '已取消，可重新查询。';
       renderQuery();
@@ -709,11 +710,11 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     const current = serial;
     const context = { title: document.title.slice(0, 500), url: window.location.origin + window.location.pathname };
-    activeTask = queue.enqueue(config, store.key(endpoint), text, true);
+    activeTask = queue.enqueue(config, store.key(config.apiId, endpoint), text, true);
     log('translation-request', { length: text.length, source: config.source, target: config.target, hiddenFeePopup: config.hideFeePopup });
     queryMessages.ai = '翻译中…';
     renderQuery();
-    report(`翻译中… 接收方：${endpoint}；模型：${config.model}；${text.length} 字符，可能产生服务费用。`);
+    report(`翻译中… 服务：${config.apiName}；${text.length} 字符，可能产生服务费用。`);
     try {
       const result = await activeTask.promise;
       if (serial !== current) return;
@@ -751,14 +752,13 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const readingPage = pages.get('reading');
   const readingStatus = element('p', '尚未开启网页翻译', 'status');
   readingStatus.setAttribute('role', 'status');
-  const reader = createReader({ document, queue, key: (endpoint) => store.key(endpoint),
+  const reader = createReader({ document, queue, key: (apiId, endpoint) => store.key(apiId, endpoint),
     onStatus: (message) => { readingStatus.textContent = message; updateReadingControls(); } });
   function startReading(automatic = false, paragraphsOnly = false) {
     const config = siteSettings(store.settings(), window.location?.hostname);
     const policy = sitePolicy(config, window.location?.hostname);
     if (policy.mode === 'disabled') throw new Error('此网站已禁用翻译');
-    const endpoint = serviceEndpoint(config);
-    if (!automatic && !window.confirm(`将向 ${endpoint}\n模型 ${config.model} ${paragraphsOnly ? '发送你点击翻译按钮的段落正文' : '持续发送当前可见正文、滚动后出现及动态加载的正文'}，可能产生多次请求和费用。不发送 URL、输入框或代码。\n是否开启网页阅读？`)) return;
+    if (!automatic && !window.confirm(`将使用 ${config.apiName} ${paragraphsOnly ? '发送你点击翻译按钮的段落正文' : '持续发送当前可见正文、滚动后出现及动态加载的正文'}，可能产生多次请求和费用。不发送 URL、输入框或代码。\n是否开启网页阅读？`)) return;
     reader.start(config, { automatic: !paragraphsOnly });
     updateReadingControls();
   }
@@ -955,8 +955,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     }
     queryMessages.dictionary = '等待词典查询确认…';
     renderQuery();
-    const url = dictionaryURL(config.url, term);
-    if (!window.confirm(`将向 ${url}\n发送当前查询词（最多 200 字符）。${config.mode === 'javascript' ? '随后执行你保存的词典解析 JS。' : ''}不发送翻译密钥或上下文。是否查询？`)) {
+    if (!window.confirm(`将使用 ${config.name || '当前词典'} 查询当前词（最多 200 字符）。${config.mode === 'javascript' ? '随后执行你保存的词典解析 JS。' : ''}不发送翻译密钥或上下文。是否查询？`)) {
       queryMessages.dictionary = '已取消词典查询。';
       renderQuery();
       return;
@@ -970,7 +969,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     try {
       const result = await dictionaryTask.promise;
       if (current !== dictionarySerial || term !== original.value.trim() || pageURL !== window.location?.href) return;
-      dictionaryEntry = { term, ...result, provider: config.mode === 'bing' ? '微软 Bing 词典' : '自定义词典', url };
+      dictionaryEntry = { term, ...result, provider: config.name || (config.mode === 'bing' ? '微软 Bing 词典' : '自定义词典'), url: '' };
       report('词典查询完成；结果为词典来源，不是模型解释。');
     } catch (error) { if (current === dictionarySerial) { queryFailed = true; queryMessages.dictionary = '词典查询失败，可重试或手动改用 AI。'; report(error); } }
     finally { if (current === dictionarySerial) { dictionaryTask = undefined; renderQuery(); } }
@@ -1044,12 +1043,294 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const defaultTarget = field(settingsPage, '默认目标语言', false, 35);
   settingsPage = group(settingsRoot, 'AI 服务与凭据');
   const serviceGroup = settingsPage;
-  help(settingsPage, '服务协议', '支持非流式 OpenAI Chat Completions、Anthropic Messages（2023-06-01）及 Gemini generateContent。切换协议需同时修改地址、模型与参数；不会自动把内容转发到其他服务。');
-  const endpointInput = field(settingsPage, 'HTTPS 服务地址（例如 https://example.com/v1）', false, 2048);
-  const modelInput = field(settingsPage, '模型', false, 200);
-  const extraInput = field(settingsPage, '附加参数 JSON（temperature、top_p、max_tokens、max_completion_tokens、enable_thinking）', true, 8000);
-  const protocolInput = choice('翻译服务协议', [['openai', 'OpenAI Chat Completions'], ['anthropic', 'Anthropic Messages'], ['gemini', 'Gemini generateContent']]);
-  help(settingsPage, '地址与参数', 'Anthropic 地址示例 https://api.anthropic.com/v1；Gemini 示例 https://generativelanguage.googleapis.com/v1beta。模型由你填写；两者附加参数仅支持 temperature、top_p、max_tokens（Gemini 自动映射）。');
+  help(settingsPage, '服务协议', 'Index Translate 为内置只读配置，地址、模型和凭据均不显示。自定义 API 可保存多个，选中项用于文本翻译和网页阅读；切换不会自动发送内容。');
+  const apiSelect = choice('当前 API', [[BUILTIN_API_ID, 'Index Translate（内置，已隐藏）']]);
+  const apiSummary = element('p', '', 'hint');
+  const apiActions = element('div', '', 'row');
+  const apiEditButton = button('编辑当前 API', () => openApiEditor());
+  const apiAddButton = button('添加 API', () => startApiDraft());
+  const apiDeleteButton = button('删除当前 API', () => deleteSelectedApi());
+  apiActions.append(apiEditButton, apiAddButton, apiDeleteButton);
+  const apiEditor = element('div');
+  apiEditor.hidden = true;
+  const apiNameInput = field(apiEditor, 'API 名称', false, 60);
+  const protocolInput = choice('翻译服务协议', [['openai', 'OpenAI Chat Completions'], ['anthropic', 'Anthropic Messages'], ['gemini', 'Gemini generateContent']], apiEditor);
+  const endpointInput = field(apiEditor, 'HTTPS 服务地址（例如 https://example.com/v1）', false, 2048);
+  const apiKeyInput = field(apiEditor, 'API Key（保存后不回显；留空保持已有凭据）', false, 4096);
+  apiKeyInput.type = 'password';
+  const keyStatus = element('p', '', 'hint');
+  const keyActions = element('div', '', 'row');
+  const saveKeyButton = button('保存 API Key', saveApiKey);
+  const clearKeyButton = button('清除此 API Key', clearApiKey);
+  keyActions.append(saveKeyButton, clearKeyButton);
+  const extraInput = field(apiEditor, '附加参数 JSON（temperature、top_p、max_tokens、max_completion_tokens、enable_thinking）', true, 8000);
+  const modelLabel = element('label', '模型（拉取后选择）');
+  const modelSelect = element('select');
+  modelLabel.append(modelSelect);
+  apiEditor.append(modelLabel);
+  const manualModelInput = field(apiEditor, '模型（手动填写兜底）', false, 200);
+  const modelStatus = element('p', '', 'hint');
+  const modelActions = element('div', '', 'row');
+  modelActions.append(button('拉取模型', () => fetchModels(false)));
+  const apiEditorActions = element('div', '', 'row');
+  const apiSaveButton = button('保存并启用', saveApiDraft, 'primary');
+  const apiCancelButton = button('取消', cancelApiDraft);
+  apiEditorActions.append(apiSaveButton, apiCancelButton);
+  apiEditor.append(keyStatus, keyActions, modelStatus, modelActions, apiEditorActions);
+  serviceGroup.append(apiSummary, apiActions, apiEditor);
+  help(serviceGroup, '地址与参数', 'Anthropic 地址示例 https://api.anthropic.com/v1；Gemini 示例 https://generativelanguage.googleapis.com/v1beta。填写 URL 和 API Key 后会自动拉取模型，也可手动填写；两者附加参数仅支持 temperature、top_p、max_tokens（Gemini 自动映射）。');
+  let editingApiId = '';
+  let apiDraft = false;
+  let apiEditorOpen = false;
+  let modelTask;
+  let modelSerial = 0;
+  let modelTimer;
+  function setOptions(select, entries) {
+    select.replaceChildren(...entries.map(([value, title]) => {
+      const option = element('option', title);
+      option.value = value;
+      return option;
+    }));
+  }
+  function apiProfile(id = settings.selectedApiId) {
+    return id === BUILTIN_API_ID ? undefined : settings.apiProfiles.find((profile) => profile.id === id);
+  }
+  function populateApiSelect() {
+    setOptions(apiSelect, [[BUILTIN_API_ID, 'Index Translate（内置，已隐藏）'],
+      ...settings.apiProfiles.map((profile) => [profile.id, profile.name])]);
+    apiSelect.value = settings.selectedApiId;
+  }
+  function updateApiSummary() {
+    const profile = apiProfile();
+    if (!profile) apiSummary.textContent = '内置配置；地址、模型与凭据均不显示。';
+    else {
+      const saved = store.key(profile.id, profile.endpoint);
+      apiSummary.textContent = `已选：${profile.name}；地址、模型与凭据已隐藏。${saved ? ' 已保存 API Key。' : ' 未保存 API Key。'}`;
+    }
+    apiEditButton.hidden = !profile;
+    apiDeleteButton.hidden = !profile;
+  }
+  function updateKeyStatus() {
+    if (!editingApiId || editingApiId === BUILTIN_API_ID) {
+      keyStatus.textContent = '内置服务不显示凭据。';
+      return;
+    }
+    const typed = apiKeyInput.value.trim();
+    const saved = store.key(editingApiId, endpointInput.value.trim());
+    keyStatus.textContent = typed ? '已填写新 Key；保存后生效，不回显。'
+      : saved ? '此 API 已保存 Key（不回显）。' : '此 API 未保存 Key。';
+  }
+  function setModelOptions(models, current = '') {
+    const entries = [];
+    if (!models.length) {
+      if (current) entries.push([current, `${current}（当前）`]);
+      entries.push(['__manual__', '手动填写']);
+    } else {
+      entries.push(['', '请选择模型']);
+      for (const model of models) entries.push([model.id, model.label === model.id ? model.id : `${model.label}（${model.id}）`]);
+      if (current && !models.some((model) => model.id === current)) entries.push([current, `${current}（当前）`]);
+      entries.push(['__manual__', '手动填写']);
+    }
+    setOptions(modelSelect, entries);
+    modelSelect.value = current || (models.length ? '' : '__manual__');
+    manualModelInput.parentElement.hidden = modelSelect.value !== '__manual__';
+    if (modelSelect.value === '__manual__' && !manualModelInput.value) manualModelInput.value = current;
+  }
+  function loadApiForm(profile, draft = false) {
+    apiNameInput.value = profile?.name ?? '';
+    protocolInput.value = profile?.protocol ?? 'openai';
+    endpointInput.value = profile?.endpoint ?? '';
+    extraInput.value = JSON.stringify(profile?.extra ?? {}, null, 2);
+    apiKeyInput.value = '';
+    manualModelInput.value = profile?.model ?? '';
+    setModelOptions([], profile?.model ?? '');
+    modelStatus.textContent = draft ? '填写 URL 与 API Key 后会自动拉取模型；也可手动填写。' : '';
+    updateKeyStatus();
+  }
+  function resetApiForm() {
+    apiNameInput.value = '';
+    protocolInput.value = 'openai';
+    endpointInput.value = '';
+    apiKeyInput.value = '';
+    extraInput.value = '{}';
+    manualModelInput.value = '';
+    setModelOptions([]);
+    manualModelInput.parentElement.hidden = true;
+    modelStatus.textContent = '';
+    keyStatus.textContent = '';
+  }
+  function openApiEditor() {
+    const profile = apiProfile();
+    if (!profile) return;
+    editingApiId = profile.id;
+    apiDraft = false;
+    apiEditorOpen = true;
+    loadApiForm(profile);
+    apiEditor.hidden = false;
+    apiSaveButton.hidden = false;
+    apiCancelButton.hidden = false;
+    keyActions.hidden = false;
+  }
+  function startApiDraft() {
+    if (settings.apiProfiles.length >= MAX_API_PROFILES) throw new Error(`API 配置最多 ${MAX_API_PROFILES} 个`);
+    editingApiId = `api:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    apiDraft = true;
+    apiEditorOpen = true;
+    loadApiForm(undefined, true);
+    apiEditor.hidden = false;
+    apiSaveButton.hidden = false;
+    apiCancelButton.hidden = false;
+    keyActions.hidden = true;
+  }
+  function cancelModelFetch() {
+    clearTimeout(modelTimer);
+    modelTask?.cancel();
+    modelTask = undefined;
+    modelSerial += 1;
+  }
+  function closeApiEditor() {
+    cancelModelFetch();
+    apiDraft = false;
+    apiEditorOpen = false;
+    editingApiId = '';
+    apiEditor.hidden = true;
+    resetApiForm();
+    loadSettings();
+  }
+  function cancelApiDraft() {
+    if (!apiDraft) return closeApiEditor();
+    cancelModelFetch();
+    apiDraft = false;
+    apiEditorOpen = false;
+    editingApiId = '';
+    apiEditor.hidden = true;
+    resetApiForm();
+    loadSettings();
+  }
+  function readApiProfile() {
+    let extra;
+    try { extra = JSON.parse(extraInput.value); } catch { throw new Error('附加参数不是有效 JSON'); }
+    const model = modelSelect.value === '__manual__' ? manualModelInput.value.trim() : modelSelect.value;
+    return { id: editingApiId, name: apiNameInput.value, protocol: protocolInput.value,
+      endpoint: endpointInput.value, model, extra };
+  }
+  function saveApiDraft() {
+    if (!editingApiId || editingApiId === BUILTIN_API_ID) return;
+    const key = apiKeyInput.value.trim();
+    if (apiDraft && !key && !store.key(editingApiId, endpointInput.value.trim())) throw new Error('请填写 API Key');
+    if (saveSettings('apiProfile') === false) return;
+    const id = editingApiId;
+    if (key) {
+      store.saveKey(id, key);
+      cancel();
+      reader.stop();
+      queue.clearCache();
+    }
+    apiDraft = false;
+    apiEditorOpen = false;
+    editingApiId = '';
+    resetApiForm();
+    loadSettings();
+    report('API 已保存并启用；未发送翻译内容。');
+  }
+  function deleteSelectedApi() {
+    const profile = apiProfile();
+    if (!profile) return;
+    if (!window.confirm(`确认删除 API“${profile.name}”及其独立保存的 Key？`)) return;
+    const previous = store.settings();
+    const next = validateSettings({ ...previous,
+      apiProfiles: previous.apiProfiles.filter((item) => item.id !== profile.id), selectedApiId: BUILTIN_API_ID });
+    if (commitSettings(previous, next, 'apiProfile') === false) return;
+    store.saveKey(profile.id, '');
+    cancelModelFetch();
+    apiDraft = false;
+    apiEditorOpen = false;
+    editingApiId = '';
+    resetApiForm();
+    loadSettings();
+    report('已删除 API 配置；未发送请求。');
+  }
+  function saveApiKey() {
+    if (!editingApiId || editingApiId === BUILTIN_API_ID) return;
+    const key = apiKeyInput.value.trim();
+    if (!key) throw new Error('请输入 API Key');
+    store.saveKey(editingApiId, key);
+    apiKeyInput.value = '';
+    cancel();
+    reader.stop();
+    queue.clearCache();
+    updateKeyStatus();
+    updateApiSummary();
+    modelStatus.textContent = '';
+    report('API Key 已保存，不会加入备份。');
+  }
+  function clearApiKey() {
+    if (!editingApiId || editingApiId === BUILTIN_API_ID) return;
+    if (!window.confirm('确认清除此 API 保存的 Key？')) return;
+    store.saveKey(editingApiId, '');
+    cancel();
+    reader.stop();
+    queue.clearCache();
+    updateKeyStatus();
+    updateApiSummary();
+    modelStatus.textContent = '';
+    report('API Key 已清除。');
+  }
+  function scheduleModelFetch() {
+    clearTimeout(modelTimer);
+    if (!apiEditorOpen || !editingApiId || editingApiId === BUILTIN_API_ID) return;
+    const endpoint = endpointInput.value.trim();
+    const key = apiKeyInput.value.trim() || store.key(editingApiId, endpoint);
+    if (!endpoint || !key) {
+      modelStatus.textContent = endpoint ? '填写 API Key 后自动拉取模型。' : '';
+      return;
+    }
+    modelTimer = setTimeout(() => { if (apiEditorOpen) fetchModels(false); }, 700);
+  }
+  async function fetchModels() {
+    if (!apiEditorOpen) return;
+    clearTimeout(modelTimer);
+    modelTask?.cancel();
+    const current = ++modelSerial;
+    const key = apiKeyInput.value.trim()
+      || (editingApiId && editingApiId !== BUILTIN_API_ID ? store.key(editingApiId, endpointInput.value.trim()) : '');
+    if (!key) {
+      modelStatus.textContent = '请先填写 API Key。';
+      return;
+    }
+    modelStatus.textContent = '拉取模型中…';
+    try {
+      const task = listModels(request, { endpoint: endpointInput.value.trim(), protocol: protocolInput.value }, key);
+      modelTask = task;
+      const models = await task.promise;
+      if (current !== modelSerial) return;
+      modelTask = undefined;
+      setModelOptions(models, modelSelect.value === '__manual__' ? manualModelInput.value.trim() : modelSelect.value);
+      modelStatus.textContent = `已拉取 ${models.length} 个模型，请选择。`;
+    } catch (error) {
+      if (current !== modelSerial) return;
+      modelTask = undefined;
+      modelStatus.textContent = `模型拉取失败：${error.message}。可手动填写模型。`;
+    }
+  }
+  protocolInput.addEventListener('change', () => {
+    const current = modelSelect.value === '__manual__' ? manualModelInput.value.trim() : modelSelect.value;
+    setModelOptions([], current);
+    updateKeyStatus();
+    scheduleModelFetch();
+  });
+  endpointInput.addEventListener('input', () => {
+    updateKeyStatus();
+    scheduleModelFetch();
+  });
+  apiKeyInput.addEventListener('input', () => {
+    updateKeyStatus();
+    scheduleModelFetch();
+  });
+  modelSelect.addEventListener('change', () => {
+    manualModelInput.parentElement.hidden = modelSelect.value !== '__manual__';
+    if (modelSelect.value === '__manual__' && !manualModelInput.value) manualModelInput.value = '';
+  });
   const popupLabel = element('label', '关闭弹窗（不再显示翻译请求前的费用确认）');
   const popupInput = element('input');
   popupInput.type = 'checkbox';
@@ -1060,7 +1341,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   const annotationInput = element('input');
   annotationInput.type = 'checkbox';
   annotationLabel.prepend(annotationInput);
-  function choice(title, options) {
+  function choice(title, options, parent = settingsPage) {
     const label = element('label', title);
     const select = element('select');
     for (const [value, title] of options) {
@@ -1069,7 +1350,7 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       select.append(option);
     }
     label.append(select);
-    settingsPage.append(label);
+    parent.append(label);
     return select;
   }
   const fineControls = new Map();
@@ -1096,31 +1377,137 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       ? value === 'accent' ? '#17684a' : value === 'muted' ? '#666666' : '#222222' : String(value);
   }
   settingsPage = group(settingsRoot, '词典来源与解析');
-  const dictionaryMode = choice('词典类型', [['bing', '微软 Bing 词典（默认）'], ['json', '自定义 JSON 词典'], ['javascript', '自定义 JS 解析词典']]);
-  const dictionaryTemplate = field(settingsPage, '词典 HTTPS URL（用 {term} 表示查询词，不填写密钥）', false, 2048);
-  const dictionaryScript = field(settingsPage, '词典 JS 函数体（参数 responseText、term；返回 meaning、phonetic、example）', true, 20000);
+  const dictionarySelect = choice('当前词典', [[BUILTIN_DICTIONARY_ID, '微软 Bing 词典（内置，已隐藏）']]);
+  const dictionarySummary = element('p', '', 'hint');
+  const dictionaryActions = element('div', '', 'row');
+  const dictionaryEditButton = button('编辑当前词典', () => openDictionaryEditor());
+  const dictionaryAddButton = button('添加词典', () => startDictionaryDraft());
+  const dictionaryDeleteButton = button('删除当前词典', () => deleteSelectedDictionary());
+  dictionaryActions.append(dictionaryEditButton, dictionaryAddButton, dictionaryDeleteButton);
+  const dictionaryEditor = element('div');
+  dictionaryEditor.hidden = true;
+  const dictionaryNameInput = field(dictionaryEditor, '词典名称', false, 60);
+  const dictionaryMode = choice('词典类型', [['json', '自定义 JSON 词典'], ['javascript', '自定义 JS 解析词典']], dictionaryEditor);
+  const dictionaryTemplate = field(dictionaryEditor, '词典 HTTPS URL（用 {term} 表示查询词，不填写密钥）', false, 2048);
+  const dictionaryScript = field(dictionaryEditor, '词典 JS 函数体（参数 responseText、term；返回 meaning、phonetic、example）', true, 20000);
+  const dictionaryEditorActions = element('div', '', 'row');
+  const dictionarySaveButton = button('保存词典', saveDictionaryDraft, 'primary');
+  const dictionaryCancelButton = button('取消', cancelDictionaryDraft);
+  dictionaryEditorActions.append(dictionarySaveButton, dictionaryCancelButton);
+  dictionaryEditor.append(dictionaryEditorActions);
+  settingsPage.append(dictionarySummary, dictionaryActions, dictionaryEditor);
   help(settingsPage, '解析格式', 'JSON 返回 {"meaning":"释义","phonetic":"音标","example":"例句"}。JS 示例：const data = JSON.parse(responseText); return { meaning: data.definition }; 代码在禁网 Worker 内执行，不能访问 DOM/GM；2 秒超时。只保存可信代码，配置不进入备份。');
-  function saveDictionarySettings() {
-      const config = validateDictionary({ mode: dictionaryMode.value, url: dictionaryTemplate.value, script: dictionaryScript.value });
-      if (config.mode === 'javascript' && !window.confirm('确认保存并启用此词典 JS？仅使用你信任的代码；查询时会在隔离环境执行，浏览器安全限制可能导致不可用。')) { loadSettings(); return false; }
-      store.saveDictionary(config);
-      cancelDictionary();
-      queryEditing = false;
-      queryMessages.dictionary = '词典配置已变化，请重新查询。';
-      renderQuery();
-      report('词典配置已保存；未发送请求，也未执行 JS。');
-      return true;
+  let editingDictionaryId = '';
+  let dictionaryDraft = false;
+  let dictionaryEditorOpen = false;
+  function dictionaryProfile(id = store.selectedDictionaryId()) {
+    return id === BUILTIN_DICTIONARY_ID ? undefined : store.dictionaryProfiles().find((profile) => profile.id === id);
   }
-  settingsPage.append(button('恢复微软词典', () => {
-      if (!window.confirm('确认用微软 Bing 词典替换已保存的自定义词典配置？')) return;
-      store.saveDictionary(DEFAULT_DICTIONARY);
-      cancelDictionary();
-      queryEditing = false;
-      queryMessages.dictionary = '词典配置已变化，请重新查询。';
-      renderQuery();
+  function populateDictionarySelect(state = store.dictionaryState()) {
+    setOptions(dictionarySelect, [[BUILTIN_DICTIONARY_ID, '微软 Bing 词典（内置，已隐藏）'],
+      ...state.profiles.map((profile) => [profile.id, profile.name])]);
+    dictionarySelect.value = state.selectedId;
+  }
+  function updateDictionarySummary() {
+    const active = store.dictionary();
+    dictionarySummary.textContent = active.builtIn
+      ? '内置词典；URL 与解析脚本不显示。'
+      : `已选：${active.name}；URL 与解析脚本已隐藏。`;
+    dictionaryEditButton.hidden = Boolean(active.builtIn);
+    dictionaryDeleteButton.hidden = Boolean(active.builtIn);
+  }
+  function loadDictionaryForm(profile, draft = false) {
+    dictionaryNameInput.value = profile?.name ?? '';
+    dictionaryMode.value = profile?.mode ?? 'json';
+    dictionaryTemplate.value = profile?.url ?? '';
+    dictionaryScript.value = profile?.script ?? '';
+    dictionaryScript.parentElement.hidden = dictionaryMode.value !== 'javascript';
+    if (draft) dictionarySummary.textContent = '填写名称、URL 与解析方式；保存前不会请求词典。';
+  }
+  function resetDictionaryForm() {
+    dictionaryNameInput.value = '';
+    dictionaryMode.value = 'json';
+    dictionaryTemplate.value = '';
+    dictionaryScript.value = '';
+    dictionaryScript.parentElement.hidden = true;
+  }
+  function openDictionaryEditor() {
+    const profile = dictionaryProfile();
+    if (!profile) return;
+    editingDictionaryId = profile.id;
+    dictionaryDraft = false;
+    dictionaryEditorOpen = true;
+    loadDictionaryForm(profile);
+    dictionaryEditor.hidden = false;
+    dictionarySaveButton.hidden = false;
+    dictionaryCancelButton.hidden = false;
+  }
+  function startDictionaryDraft() {
+    if (store.dictionaryProfiles().length >= MAX_DICTIONARY_PROFILES) throw new Error(`词典配置最多 ${MAX_DICTIONARY_PROFILES} 个`);
+    editingDictionaryId = `dict:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    dictionaryDraft = true;
+    dictionaryEditorOpen = true;
+    loadDictionaryForm(undefined, true);
+    dictionaryEditor.hidden = false;
+    dictionarySaveButton.hidden = false;
+    dictionaryCancelButton.hidden = false;
+  }
+  function closeDictionaryEditor() {
+    dictionaryDraft = false;
+    dictionaryEditorOpen = false;
+    editingDictionaryId = '';
+    dictionaryEditor.hidden = true;
+    resetDictionaryForm();
+    loadSettings();
+  }
+  function cancelDictionaryDraft() {
+    if (!dictionaryDraft) return closeDictionaryEditor();
+    dictionaryDraft = false;
+    dictionaryEditorOpen = false;
+    editingDictionaryId = '';
+    dictionaryEditor.hidden = true;
+    resetDictionaryForm();
+    loadSettings();
+  }
+  function readDictionaryProfile() {
+    return { id: editingDictionaryId, name: dictionaryNameInput.value, mode: dictionaryMode.value,
+      url: dictionaryTemplate.value, script: dictionaryScript.value };
+  }
+  function saveDictionaryProfile() {
+    const profile = readDictionaryProfile();
+    if (profile.mode === 'javascript' && !window.confirm('确认保存并启用此词典 JS？仅使用你信任的代码；查询时会在隔离环境执行，浏览器安全限制可能导致不可用。')) {
       loadSettings();
-      report('已恢复微软词典；未发送请求。');
-    }));
+      return false;
+    }
+    store.saveDictionaryProfile(profile);
+    cancelDictionary();
+    queryEditing = false;
+    queryMessages.dictionary = '词典配置已变化，请重新查询。';
+    renderQuery();
+    report('词典配置已保存；未发送请求，也未执行 JS。');
+    return true;
+  }
+  function saveDictionaryDraft() {
+    if (!dictionaryDraft) return;
+    if (saveDictionaryProfile() === false) return;
+    dictionaryDraft = false;
+    dictionaryEditorOpen = false;
+    editingDictionaryId = '';
+    resetDictionaryForm();
+    loadSettings();
+  }
+  function deleteSelectedDictionary() {
+    const profile = dictionaryProfile();
+    if (!profile) return;
+    if (!window.confirm(`确认删除词典“${profile.name}”？`)) return;
+    store.deleteDictionaryProfile(profile.id);
+    cancelDictionary();
+    queryEditing = false;
+    queryMessages.dictionary = '词典配置已变化，请重新查询。';
+    renderQuery();
+    loadSettings();
+    report('已删除词典配置；未发送请求。');
+  }
   settingsPage = group(settingsRoot, '网页阅读与标注');
   settingsPage.append(element('h3', '标注'));
   settingsPage.append(annotationLabel);
@@ -1225,7 +1612,6 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   settingsPage.append(siteAnnotationLabel);
   help(settingsPage, '网站授权', '网站规则仅匹配当前域名。自动阅读需额外确认授权；保存后下次加载此网站时生效。禁用翻译也会关闭网站标注。');
   const diagnosticGroup = group(settingsRoot, '诊断与维护');
-  const keyStatus = element('p', '', 'hint');
   function exportDiagnostics() {
     recordLayout('export-layout');
     log('diagnostics-export');
@@ -1256,53 +1642,12 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     diagnosticPreview.parentElement.hidden = true;
     report('诊断日志已清空。');
   }));
-  serviceGroup.append(keyStatus, button('填入 Index 预设', () => {
-    endpointInput.value = INDEX_PRESET.endpoint;
-    protocolInput.value = 'openai';
-    modelInput.value = INDEX_PRESET.model;
-    extraInput.value = JSON.stringify(INDEX_PRESET.extra, null, 2);
-    updateKeyStatus();
-    autoSave(() => saveSettings('service'));
-  }), button('设置 / 清除 API Key', () => {
-    const endpoint = serviceEndpoint({ endpoint: endpointInput.value, protocol: protocolInput.value, model: modelInput.value });
-    const key = window.prompt(`为 ${endpoint} 设置 API Key。留空并确认可清除；取消则不修改。\n使用浏览器原生输入框，不回填到页面；输入可见，请避免旁人窥视。脚本存储不等于加密保险箱。`);
-    if (key === null) return;
-    if (!key.trim() && !window.confirm('确认清除此服务地址保存的 API Key？')) return;
-    store.saveKey(endpoint, key);
-    cancel();
-    reader.stop();
-    updateReadingControls();
-    queue.clearCache();
-    updateKeyStatus();
-    report('凭据已更新，不会加入备份。');
-  }));
-  function saveSettings(section) {
-    const previous = store.settings();
-    let extra;
-    try { extra = section === 'service' ? JSON.parse(extraInput.value) : previous.extra; } catch { throw new Error('附加参数不是有效 JSON'); }
-    const hostname = window.location?.hostname;
-    const siteRules = previous.siteRules.filter((rule) => rule.host !== hostname);
-    if (hostname && (siteModeInput.value !== 'manual' || !siteAnnotationInput.checked || siteSourceInput.value.trim() || siteTargetInput.value.trim())) {
-      siteRules.push({ host: hostname, mode: siteModeInput.value, annotations: siteAnnotationInput.checked,
-        source: siteSourceInput.value.trim(), target: siteTargetInput.value.trim() });
-    }
-    const draft = { protocol: protocolInput.value, endpoint: endpointInput.value, model: modelInput.value, extra,
-      source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
-      lookupProvider: providerInput.value, launcherAction: launcherInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
-      annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
-      annotationFontSize: fineValue(annotationFontSizeInput), annotationColor: fineValue(annotationColorInput),
-      annotationSpacing: fineValue(annotationSpacingInput), annotationHighlightColor: fineValue(annotationHighlightInput),
-      translationStyle: 'muted', translationMode: translationModeInput.value,
-      translationFontSize: fineValue(translationFontSizeInput), translationLineHeight: fineValue(translationLineHeightInput),
-      translationColor: fineValue(translationColorInput), translationSpacing: fineValue(translationSpacingInput), masteredDisplay: masteredDisplayInput.value,
-      knownLanguages: knownLanguagesInput.value.split(',').map((value) => value.trim()).filter(Boolean), siteRules };
-    const keys = section === 'service' ? ['protocol', 'endpoint', 'model', 'extra']
-      : section === 'site' ? ['siteRules'] : [section];
-    const next = validateSettings({ ...previous, ...Object.fromEntries(keys.map((key) => [key, draft[key]])) });
+  function commitSettings(previous, next, section) {
     if (JSON.stringify(previous) === JSON.stringify(next)) return true;
+    const hostname = window.location?.hostname;
     const automaticHosts = next.siteRules.filter((rule) => rule.mode === 'auto').map((rule) => rule.host);
-    const affectsRequests = ['service', 'site', 'source', 'target', 'knownLanguages'].includes(section);
-    if (affectsRequests && automaticHosts.length && !window.confirm(`授权以下域名下次加载时自动发送可见及动态正文：${automaticHosts.join('、')}\n接收方 ${serviceEndpoint(next)}，模型 ${next.model}，可能持续产生费用。授权使用本次保存的服务与语言设置，是否继续？`)) { loadSettings(); return false; }
+    const affectsRequests = ['apiSelect', 'apiProfile', 'site', 'source', 'target', 'knownLanguages'].includes(section);
+    if (affectsRequests && automaticHosts.length && !window.confirm(`授权以下域名下次加载时自动发送可见及动态正文：${automaticHosts.join('、')}\n接收方 ${next.apiName}，可能持续产生费用。授权使用本次保存的服务与语言设置，是否继续？`)) { loadSettings(); return false; }
     store.saveSettings(next);
     settings = next;
     applyTypography();
@@ -1327,6 +1672,36 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     report('设置已保存；未发送网络请求。');
     return true;
   }
+  function saveSettings(section) {
+    const previous = store.settings();
+    if (section === 'apiProfile') {
+      const profile = readApiProfile();
+      const apiProfiles = [...previous.apiProfiles.filter((item) => item.id !== profile.id), profile];
+      return commitSettings(previous, validateSettings({ ...previous, apiProfiles, selectedApiId: profile.id }), section);
+    }
+    if (section === 'apiSelect') {
+      const saved = commitSettings(previous, validateSettings({ ...previous, selectedApiId: apiSelect.value }), section);
+      if (saved) updateApiSummary();
+      return saved;
+    }
+    const hostname = window.location?.hostname;
+    const siteRules = previous.siteRules.filter((rule) => rule.host !== hostname);
+    if (hostname && (siteModeInput.value !== 'manual' || !siteAnnotationInput.checked || siteSourceInput.value.trim() || siteTargetInput.value.trim())) {
+      siteRules.push({ host: hostname, mode: siteModeInput.value, annotations: siteAnnotationInput.checked,
+        source: siteSourceInput.value.trim(), target: siteTargetInput.value.trim() });
+    }
+    const draft = { source: defaultSource.value.trim(), target: defaultTarget.value.trim(), annotations: annotationInput.checked,
+      lookupProvider: providerInput.value, launcherAction: launcherInput.value, autoTranslate: previous.autoTranslate, hideFeePopup: popupInput.checked,
+      annotationFrequency: frequencyInput.value, annotationStyle: annotationStyleInput.value,
+      annotationFontSize: fineValue(annotationFontSizeInput), annotationColor: fineValue(annotationColorInput),
+      annotationSpacing: fineValue(annotationSpacingInput), annotationHighlightColor: fineValue(annotationHighlightInput),
+      translationStyle: 'muted', translationMode: translationModeInput.value,
+      translationFontSize: fineValue(translationFontSizeInput), translationLineHeight: fineValue(translationLineHeightInput),
+      translationColor: fineValue(translationColorInput), translationSpacing: fineValue(translationSpacingInput), masteredDisplay: masteredDisplayInput.value,
+      knownLanguages: knownLanguagesInput.value.split(',').map((value) => value.trim()).filter(Boolean), siteRules };
+    const keys = section === 'site' ? ['siteRules'] : [section];
+    return commitSettings(previous, validateSettings({ ...previous, ...Object.fromEntries(keys.map((key) => [key, draft[key]])) }), section);
+  }
   function applyTypography() {
     panel.style.setProperty('--translation-scale', String(settings.translationFontSize));
     panel.style.setProperty('--translation-leading', String(settings.translationLineHeight));
@@ -1337,7 +1712,6 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   }
   for (const [input, section] of [
     [launcherInput, 'launcherAction'], [providerInput, 'lookupProvider'], [defaultSource, 'source'], [defaultTarget, 'target'],
-    [protocolInput, 'service'], [endpointInput, 'service'], [modelInput, 'service'], [extraInput, 'service'],
     [popupInput, 'hideFeePopup'], [annotationInput, 'annotations'], [frequencyInput, 'annotationFrequency'],
     [annotationStyleInput, 'annotationStyle'], [translationModeInput, 'translationMode'],
     [annotationFontSizeInput, 'annotationFontSize'], [annotationColorInput, 'annotationColor'],
@@ -1349,7 +1723,6 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
   ]) {
     input.addEventListener('change', (event) => {
       if (!event.isTrusted) return;
-      if (section === 'service') updateKeyStatus();
       if (fineControls.has(input) && input.value !== 'custom') loadFine(input, input.value);
       autoSave(() => saveSettings(section));
     });
@@ -1365,29 +1738,37 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
       fine.input.addEventListener('change', saveFine);
     }
   }
-  for (const input of [dictionaryMode, dictionaryTemplate, dictionaryScript]) {
-    input.addEventListener('change', (event) => { if (event.isTrusted) autoSave(saveDictionarySettings); });
-  }
+  apiSelect.addEventListener('change', (event) => {
+    if (!event.isTrusted) return;
+    autoSave(() => saveSettings('apiSelect'));
+  });
+  dictionarySelect.addEventListener('change', (event) => {
+    if (!event.isTrusted) return;
+    autoSave(() => {
+      store.selectDictionary(dictionarySelect.value);
+      cancelDictionary();
+      queryEditing = false;
+      queryMessages.dictionary = '词典配置已变化，请重新查询。';
+      renderQuery();
+      updateDictionarySummary();
+      return true;
+    });
+  });
+  dictionaryMode.addEventListener('change', () => {
+    dictionaryScript.parentElement.hidden = dictionaryMode.value !== 'javascript';
+  });
   help(diagnosticGroup, '日志内容', '诊断日志最多保留 300 条，记录事件、长度、开关与面板尺寸，不含原文、译文、URL、密钥或错误正文；仅本地保存，不自动上传。');
   const diagnosticPreview = field(diagnosticGroup, '诊断日志（下载失败时可全选复制）', true, 500000);
   diagnosticPreview.readOnly = true;
   diagnosticPreview.parentElement.hidden = true;
-  function updateKeyStatus() {
-    try { keyStatus.textContent = store.key(serviceEndpoint({ endpoint: endpointInput.value, protocol: protocolInput.value, model: modelInput.value })) ? '此地址已保存 API Key（不回显）' : '此地址未保存 API Key'; }
-    catch { keyStatus.textContent = '请填写有效服务地址'; }
-  }
-  endpointInput.addEventListener('input', updateKeyStatus);
-  modelInput.addEventListener('input', updateKeyStatus);
   function loadSettings() {
     settings = store.settings();
-    protocolInput.value = settings.protocol;
-    const dictionary = store.dictionary();
-    dictionaryMode.value = dictionary.mode;
-    dictionaryTemplate.value = dictionary.url;
-    dictionaryScript.value = dictionary.script;
-    endpointInput.value = settings.endpoint;
-    modelInput.value = settings.model;
-    extraInput.value = JSON.stringify(settings.extra, null, 2);
+    populateApiSelect();
+    updateApiSummary();
+    populateDictionarySelect();
+    updateDictionarySummary();
+    if (!apiEditorOpen) resetApiForm();
+    if (!dictionaryEditorOpen) resetDictionaryForm();
     defaultSource.value = settings.source;
     defaultTarget.value = settings.target;
     annotationInput.checked = settings.annotations;
@@ -1401,7 +1782,6 @@ export function mountUI({ document, store, request, annotator, registerMenu }) {
     siteAnnotationInput.checked = policy.annotations;
     siteSourceInput.value = policy.source || '';
     siteTargetInput.value = policy.target || '';
-    updateKeyStatus();
     applyTypography();
   }
   function loadAppearanceSettings() {

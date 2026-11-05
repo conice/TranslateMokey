@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { translate } from '../src/service.js';
+import { listModels, modelsEndpoint, translate } from '../src/service.js';
 import { DEFAULT_SETTINGS, serviceEndpoint, validateSettings } from '../src/core.js';
 
 test('构造非流式请求、附加参数及隐私边界', async () => {
@@ -121,4 +121,57 @@ test('旧设置默认 OpenAI；新协议拒绝旧私有参数和错误模型路�
   for (const protocol of ['anthropic', 'gemini', 'unknown']) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, protocol }));
   assert.throws(() => serviceEndpoint({ endpoint: 'https://example.com/v1', protocol: 'gemini', model: '../bad' }));
   assert.throws(() => serviceEndpoint({ endpoint: 'https://example.com/v1/chat/completions', protocol: 'anthropic' }));
+});
+
+test('模型列表端点、鉴权与 Gemini 能力过滤', async () => {
+  assert.equal(modelsEndpoint({ endpoint: 'https://example.com/v1/chat/completions', protocol: 'openai' }), 'https://example.com/v1/models');
+  assert.equal(modelsEndpoint({ endpoint: 'https://example.com/v1/messages', protocol: 'anthropic' }), 'https://example.com/v1/models');
+  assert.equal(modelsEndpoint({ endpoint: 'https://example.com/v1beta', protocol: 'gemini' }), 'https://example.com/v1beta/models');
+  let sent;
+  const openai = listModels((options) => {
+    sent = options;
+    options.onload({ status: 200, responseText: '{"data":[{"id":"model-a"},{"id":"model-b","display_name":"模型 B"}]}' });
+    return { abort() {} };
+  }, { endpoint: 'https://example.com/v1', protocol: 'openai' }, 'test-key');
+  assert.deepEqual(await openai.promise, [{ id: 'model-a', label: 'model-a' }, { id: 'model-b', label: '模型 B' }]);
+  assert.equal(sent.url, 'https://example.com/v1/models');
+  assert.equal(sent.headers.Authorization, 'Bearer test-key');
+  assert.equal(sent.anonymous, true);
+  assert.equal(sent.redirect, 'error');
+
+  const anthropic = listModels((options) => {
+    sent = options;
+    options.onload({ status: 200, responseText: '{"data":[{"id":"claude-test"}]}' });
+    return { abort() {} };
+  }, { endpoint: 'https://api.anthropic.com/v1/messages', protocol: 'anthropic' }, 'anthropic-key');
+  assert.deepEqual(await anthropic.promise, [{ id: 'claude-test', label: 'claude-test' }]);
+  assert.equal(sent.headers['x-api-key'], 'anthropic-key');
+  assert.equal(sent.headers['anthropic-version'], '2023-06-01');
+
+  const gemini = listModels((options) => {
+    sent = options;
+    options.onload({ status: 200, responseText: JSON.stringify({ models: [
+      { name: 'models/gemini-pro', displayName: 'Gemini Pro', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/embedding', supportedGenerationMethods: ['embedContent'] },
+    ] }) });
+    return { abort() {} };
+  }, { endpoint: 'https://generativelanguage.googleapis.com/v1beta', protocol: 'gemini' }, 'gemini-key');
+  assert.deepEqual(await gemini.promise, [{ id: 'gemini-pro', label: 'Gemini Pro' }]);
+  assert.equal(sent.headers['x-goog-api-key'], 'gemini-key');
+});
+
+test('模型列表拒绝无效响应、重定向与敏感错误正文，并支持取消', async () => {
+  for (const response of [
+    { status: 401, responseText: 'SECRET' }, { status: 429, responseText: 'SECRET' }, { status: 500, responseText: 'SECRET' },
+    { status: 200, responseText: 'SECRET' }, { status: 200, responseText: '{"data":[]}' },
+    { status: 200, finalUrl: 'https://evil.example/models', responseText: '{"data":[{"id":"model"}]}' },
+  ]) {
+    await assert.rejects(listModels((options) => options.onload(response), { endpoint: 'https://example.com/v1', protocol: 'openai' }, 'key').promise,
+      (error) => !error.message.includes('SECRET'));
+  }
+  let aborted = false;
+  const task = listModels(() => ({ abort() { aborted = true; } }), { endpoint: 'https://example.com/v1', protocol: 'openai' }, 'key');
+  task.cancel();
+  await assert.rejects(task.promise, /取消/);
+  assert.equal(aborted, true);
 });

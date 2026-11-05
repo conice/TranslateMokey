@@ -1,6 +1,12 @@
 import { boundedText } from './core.js';
 
+export const BUILTIN_DICTIONARY_ID = 'builtin:bing';
+export const MAX_DICTIONARY_PROFILES = 20;
 export const DEFAULT_DICTIONARY = Object.freeze({ mode: 'bing', url: 'https://cn.bing.com/dict/search?q={term}', script: '' });
+
+function builtInDictionary() {
+  return { ...DEFAULT_DICTIONARY, id: BUILTIN_DICTIONARY_ID, name: '微软 Bing 词典（内置）', builtIn: true };
+}
 
 export function dictionaryURL(template, term) {
   const value = boundedText(template, '词典 URL 模板', 2048);
@@ -19,6 +25,42 @@ export function validateDictionary(value) {
   const url = value.mode === 'bing' ? DEFAULT_DICTIONARY.url : boundedText(value.url, '词典 URL', 2048);
   dictionaryURL(url, 'example');
   return { mode: value.mode, url, script: boundedText(value.script ?? '', '词典 JS', 20000, value.mode !== 'javascript') };
+}
+
+export function validateDictionaryProfile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('词典配置格式无效');
+  const id = boundedText(value.id, '词典标识', 80);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,79}$/.test(id) || id === BUILTIN_DICTIONARY_ID) throw new Error('词典标识无效');
+  const name = boundedText(value.name, '词典名称', 60);
+  if (!['json', 'javascript'].includes(value.mode)) throw new Error('自定义词典类型无效');
+  const url = boundedText(value.url, '词典 URL', 2048);
+  dictionaryURL(url, 'example');
+  return { id, name, mode: value.mode, url, script: boundedText(value.script ?? '', '词典 JS', 20000, value.mode !== 'javascript') };
+}
+
+export function validateDictionaryStore(value) {
+  if (value === undefined) return { selectedId: BUILTIN_DICTIONARY_ID, profiles: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('词典存储格式无效');
+  if (Array.isArray(value.profiles)) {
+    if (value.profiles.length > MAX_DICTIONARY_PROFILES) throw new Error(`词典配置最多 ${MAX_DICTIONARY_PROFILES} 个`);
+    const profiles = value.profiles.map(validateDictionaryProfile);
+    if (new Set(profiles.map((profile) => profile.id)).size !== profiles.length) throw new Error('词典配置标识重复');
+    const selectedId = boundedText(value.selectedId ?? BUILTIN_DICTIONARY_ID, '当前词典', 80);
+    if (selectedId !== BUILTIN_DICTIONARY_ID && !profiles.some((profile) => profile.id === selectedId)) throw new Error('所选词典不存在');
+    return { selectedId, profiles };
+  }
+  const legacy = validateDictionary(value);
+  if (legacy.mode === 'bing') return { selectedId: BUILTIN_DICTIONARY_ID, profiles: [] };
+  const profile = validateDictionaryProfile({ id: 'legacy:dictionary', name: '自定义词典', ...legacy });
+  return { selectedId: profile.id, profiles: [profile] };
+}
+
+export function resolveDictionaryStore(value) {
+  const state = validateDictionaryStore(value);
+  if (state.selectedId === BUILTIN_DICTIONARY_ID) return builtInDictionary();
+  const profile = state.profiles.find((item) => item.id === state.selectedId);
+  if (!profile) throw new Error('所选词典不存在');
+  return { ...profile, builtIn: false };
 }
 
 export function dictionaryResult(value) {

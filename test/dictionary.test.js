@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { DEFAULT_DICTIONARY, dictionaryURL, dictionaryResult, validateDictionary, lookupDictionary, runDictionaryScript, parseBing } from '../src/dictionary.js';
+import { BUILTIN_DICTIONARY_ID, DEFAULT_DICTIONARY, dictionaryURL, dictionaryResult, resolveDictionaryStore, validateDictionary, validateDictionaryProfile, validateDictionaryStore, lookupDictionary, runDictionaryScript, parseBing } from '../src/dictionary.js';
 
 test('默认微软词典、编码与外部 URL 校验', () => {
   assert.equal(validateDictionary(DEFAULT_DICTIONARY).mode, 'bing');
@@ -13,6 +13,24 @@ test('默认微软词典、编码与外部 URL 校验', () => {
   assert.throws(() => validateDictionary({ mode: 'invalid' }));
   assert.deepEqual(dictionaryResult({ meaning: '<img onerror=alert(1)>', apiKey: 'secret' }), { meaning: '<img onerror=alert(1)>', phonetic: '', example: '' });
   for (const data of [null, [], {}, { meaning: ' ' }, { meaning: 'ok', phonetic: 3 }]) assert.throws(() => dictionaryResult(data));
+});
+
+test('默认词典只读，自定义词典可多条目选择且旧配置可迁移', () => {
+  assert.equal(validateDictionaryStore(undefined).selectedId, BUILTIN_DICTIONARY_ID);
+  const first = { id: 'dict:one', name: '词典一', mode: 'json', url: 'https://one.example/?q={term}', script: '' };
+  const second = { id: 'dict:two', name: '词典二', mode: 'javascript', url: 'https://two.example/?q={term}', script: 'return {meaning: term};' };
+  const state = validateDictionaryStore({ selectedId: second.id, profiles: [first, second] });
+  assert.equal(resolveDictionaryStore(state).name, '词典二');
+  assert.equal(resolveDictionaryStore({ selectedId: BUILTIN_DICTIONARY_ID, profiles: [first] }).builtIn, true);
+  const legacy = validateDictionaryStore({ mode: 'json', url: 'https://legacy.example/?q={term}', script: '' });
+  assert.equal(legacy.selectedId, 'legacy:dictionary');
+  assert.equal(legacy.profiles[0].name, '自定义词典');
+  for (const value of [
+    { selectedId: 'dict:missing', profiles: [first] },
+    { selectedId: BUILTIN_DICTIONARY_ID, profiles: [first, first] },
+    { selectedId: BUILTIN_DICTIONARY_ID, profiles: [{ ...first, id: BUILTIN_DICTIONARY_ID }] },
+  ]) assert.throws(() => validateDictionaryStore(value));
+  assert.throws(() => validateDictionaryProfile({ ...first, mode: 'bing' }), /类型/);
 });
 
 test('JSON 词典使用匿名 GET，不携带翻译凭据并校验响应', async () => {

@@ -17,13 +17,21 @@ function fixture() {
 }
 
 test('默认设置、独立凭据及持久化', () => {
-  const { store } = fixture();
+  const { store, values } = fixture();
   assert.equal(store.settings().model, DEFAULT_SETTINGS.model);
   store.saveSettings({ ...DEFAULT_SETTINGS, target: 'ja' });
-  store.saveKey('https://example.com/v1/chat/completions', 'sample-key');
+  store.saveKey('api:one', 'sample-key');
+  store.saveKey('api:two', 'second-key');
   assert.equal(store.settings().target, 'ja');
-  assert.equal(store.key('https://other.example.com'), '');
-  assert.equal(store.key('https://example.com/v1/chat/completions'), 'sample-key');
+  assert.equal(store.key('api:one'), 'sample-key');
+  assert.equal(store.key('api:two'), 'second-key');
+  assert.equal(store.key('api:missing'), '');
+  values.set('tm:secret:https://legacy.example/v1/chat/completions', 'legacy-key');
+  assert.equal(store.key('legacy:api', 'https://legacy.example/v1/chat/completions'), 'legacy-key');
+  store.saveKey('legacy:api', '');
+  assert.equal(store.key('legacy:api', 'https://legacy.example/v1/chat/completions'), '');
+  assert.equal(store.key('builtin:index', DEFAULT_SETTINGS.endpoint), '');
+  assert.throws(() => store.saveKey('builtin:index', 'not-allowed'), /内置/);
   assert.throws(() => store.saveKey('test', 'bad\r\nheader'));
 });
 
@@ -110,11 +118,31 @@ test('复习写入失败不伪造持久化成功', () => {
   assert.equal(store.entries()[0].review, undefined);
 });
 
-test('词典配置独立保存，旧存储默认微软，不污染翻译设置', () => {
+test('词典配置独立保存、可选择多个，旧存储可迁移且不污染翻译设置', () => {
   const { store, api } = fixture();
   assert.equal(store.dictionary().mode, 'bing');
-  store.saveDictionary({ mode: 'javascript', url: 'https://dictionary.example/?q={term}', script: 'return {meaning: responseText};' });
+  assert.equal(store.dictionary().builtIn, true);
+  const first = store.saveDictionaryProfile({ id: 'dict:one', name: '词典一', mode: 'javascript',
+    url: 'https://dictionary.example/?q={term}', script: 'return {meaning: responseText};' });
+  assert.equal(first.id, 'dict:one');
+  store.saveDictionaryProfile({ id: 'dict:two', name: '词典二', mode: 'json', url: 'https://two.example/?q={term}', script: '' });
+  assert.equal(createStore(api).dictionary().name, '词典二');
+  store.selectDictionary('dict:one');
   assert.equal(createStore(api).dictionary().script, 'return {meaning: responseText};');
+  store.selectDictionary('builtin:bing');
+  assert.equal(store.dictionary().builtIn, true);
+  store.deleteDictionaryProfile('dict:one');
+  assert.equal(store.dictionaryProfiles().length, 1);
   assert.equal(store.settings().protocol, 'openai');
-  assert.throws(() => store.saveDictionary({ mode: 'json', url: 'http://example.com?q={term}' }));
+  assert.throws(() => store.saveDictionaryProfile({ id: 'dict:bad', name: '坏词典', mode: 'json', url: 'http://example.com?q={term}', script: '' }));
+});
+
+test('旧版单一词典配置迁移为独立条目并保持选中', () => {
+  const { store, values } = fixture();
+  values.set('tm:dictionary', { version: 1, value: { mode: 'json', url: 'https://legacy.example/?q={term}', script: '' } });
+  assert.equal(store.dictionary().id, 'legacy:dictionary');
+  assert.equal(store.dictionary().name, '自定义词典');
+  assert.equal(store.dictionary().url, 'https://legacy.example/?q={term}');
+  values.set('tm:dictionary', { version: 1, value: { mode: 'bing', url: 'https://cn.bing.com/dict/search?q={term}', script: '' } });
+  assert.equal(store.dictionary().builtIn, true);
 });

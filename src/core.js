@@ -1,5 +1,7 @@
 export const SCHEMA_VERSION = 1;
 export const BACKUP_VERSION = 2;
+export const BUILTIN_API_ID = 'builtin:index';
+export const MAX_API_PROFILES = 20;
 export const INDEX_PRESET = Object.freeze({
   endpoint: 'https://index-translate.bilibili.com/v1',
   model: 'index-mt-9b',
@@ -8,6 +10,8 @@ export const INDEX_PRESET = Object.freeze({
 export const DEFAULT_SETTINGS = Object.freeze({
   ...INDEX_PRESET,
   protocol: 'openai',
+  selectedApiId: BUILTIN_API_ID,
+  apiProfiles: [],
   lookupProvider: 'ai',
   launcherAction: 'translate',
   source: 'auto',
@@ -76,20 +80,12 @@ export function serviceEndpoint({ endpoint, protocol = 'openai', model }) {
   return url.href;
 }
 
-export function validateSettings(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('设置格式无效');
-  const lookupProvider = value.lookupProvider ?? 'ai';
-  if (!['ai', 'dictionary'].includes(lookupProvider)) throw new Error('默认查询来源必须是 AI 或词典');
-  const launcherAction = value.launcherAction ?? 'translate';
-  if (!['translate', 'reading', 'words', 'review', 'menu'].includes(launcherAction)) throw new Error('右下角按钮功能无效');
-  const protocol = value.protocol ?? 'openai';
-  serviceEndpoint({ ...value, protocol });
-  const extra = value.extra;
-  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('附加参数必须是 JSON 对象');
-  if (JSON.stringify(extra).length > 8000) throw new Error('附加参数过长');
+function validateExtra(value, protocol) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('附加参数必须是 JSON 对象');
+  if (JSON.stringify(value).length > 8000) throw new Error('附加参数过长');
   const allowed = new Set(protocol === 'openai' ? ['temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'chat_template_kwargs']
     : ['temperature', 'top_p', 'max_tokens']);
-  for (const [key, item] of Object.entries(extra)) {
+  for (const [key, item] of Object.entries(value)) {
     if (!allowed.has(key)) throw new Error(`不支持的附加参数：${key}`);
     if (key === 'chat_template_kwargs') {
       if (!item || typeof item !== 'object' || Array.isArray(item)
@@ -103,6 +99,65 @@ export function validateSettings(value) {
       throw new Error(`附加参数 ${key} 的数值无效`);
     }
   }
+  return JSON.parse(JSON.stringify(value));
+}
+
+export function validateApiProfile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('API 配置格式无效');
+  const id = boundedText(value.id, 'API 标识', 80);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,79}$/.test(id) || id === BUILTIN_API_ID) throw new Error('API 标识无效');
+  const name = boundedText(value.name, 'API 名称', 60);
+  const protocol = value.protocol ?? 'openai';
+  if (!['openai', 'anthropic', 'gemini'].includes(protocol)) throw new Error('服务协议无效');
+  const endpoint = boundedText(value.endpoint, '服务地址', 2048);
+  const model = boundedText(value.model, '模型', 200);
+  serviceEndpoint({ endpoint, protocol, model });
+  return { id, name, protocol, endpoint, model, extra: validateExtra(value.extra === undefined ? {} : value.extra, protocol) };
+}
+
+function builtInApi() {
+  return { id: BUILTIN_API_ID, name: 'Index Translate（内置）', protocol: 'openai',
+    endpoint: INDEX_PRESET.endpoint, model: INDEX_PRESET.model, extra: JSON.parse(JSON.stringify(INDEX_PRESET.extra)) };
+}
+
+function validateApiSettings(value) {
+  const rawProfiles = value.apiProfiles ?? [];
+  if (!Array.isArray(rawProfiles) || rawProfiles.length > MAX_API_PROFILES) throw new Error(`API 配置最多 ${MAX_API_PROFILES} 个`);
+  const apiProfiles = rawProfiles.map(validateApiProfile);
+  if (new Set(apiProfiles.map((profile) => profile.id)).size !== apiProfiles.length) throw new Error('API 配置标识重复');
+
+  const legacyPreset = () => value.protocol === 'openai' && value.endpoint === INDEX_PRESET.endpoint
+    && value.model === INDEX_PRESET.model
+    && JSON.stringify(value.extra === undefined ? {} : value.extra) === JSON.stringify(INDEX_PRESET.extra);
+  let selectedApiId = value.selectedApiId;
+  if (selectedApiId === undefined) {
+    if (legacyPreset()) selectedApiId = BUILTIN_API_ID;
+    else {
+      const legacy = validateApiProfile({ id: 'legacy:api', name: '自定义 API', protocol: value.protocol ?? 'openai',
+        endpoint: value.endpoint, model: value.model, extra: value.extra === undefined ? {} : value.extra });
+      apiProfiles.push(legacy);
+      selectedApiId = legacy.id;
+    }
+  } else if (selectedApiId === BUILTIN_API_ID && !apiProfiles.length && !legacyPreset()) {
+    const legacy = validateApiProfile({ id: 'legacy:api', name: '自定义 API', protocol: value.protocol ?? 'openai',
+      endpoint: value.endpoint, model: value.model, extra: value.extra === undefined ? {} : value.extra });
+    apiProfiles.push(legacy);
+    selectedApiId = legacy.id;
+  }
+  selectedApiId = boundedText(selectedApiId, '当前 API', 80);
+  if (selectedApiId === BUILTIN_API_ID) return { ...builtInApi(), selectedApiId, apiProfiles };
+  const profile = apiProfiles.find((item) => item.id === selectedApiId);
+  if (!profile) throw new Error('所选 API 不存在');
+  return { ...profile, selectedApiId, apiProfiles };
+}
+
+export function validateSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('设置格式无效');
+  const lookupProvider = value.lookupProvider ?? 'ai';
+  if (!['ai', 'dictionary'].includes(lookupProvider)) throw new Error('默认查询来源必须是 AI 或词典');
+  const launcherAction = value.launcherAction ?? 'translate';
+  if (!['translate', 'reading', 'words', 'review', 'menu'].includes(launcherAction)) throw new Error('右下角按钮功能无效');
+  const api = validateApiSettings(value);
   if (typeof value.annotations !== 'boolean') throw new Error('标注开关格式无效');
   for (const key of ['autoTranslate', 'hideFeePopup']) {
     if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new Error('自动翻译与弹窗开关必须是布尔值');
@@ -156,9 +211,10 @@ export function validateSettings(value) {
   });
   if (new Set(siteRules.map((rule) => rule.host)).size !== siteRules.length) throw new Error('网站规则重复');
   return {
-    protocol, lookupProvider, launcherAction, endpoint: value.endpoint.trim(), model: boundedText(value.model, '模型', 200),
+    protocol: api.protocol, lookupProvider, launcherAction, endpoint: api.endpoint, model: api.model,
+    apiId: api.id, apiName: api.name, selectedApiId: api.selectedApiId, apiProfiles: api.apiProfiles,
     source: language(value.source, true), target: language(value.target),
-    extra: JSON.parse(JSON.stringify(extra)), annotations: value.annotations,
+    extra: api.extra, annotations: value.annotations,
     autoTranslate: value.autoTranslate ?? false, hideFeePopup: value.hideFeePopup ?? false,
     annotationFrequency, annotationStyle, translationStyle, siteRules,
     annotationFontSize, annotationColor, annotationSpacing, annotationHighlightColor,

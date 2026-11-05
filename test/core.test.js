@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateEntry, validateSettings, sitePolicy, siteSettings, translationAppearance } from '../src/core.js';
+import { BUILTIN_API_ID, DEFAULT_SETTINGS, INDEX_PRESET, completionEndpoint, createMatcher, entryId, exportBackup, parseBackup, validateApiProfile, validateEntry, validateSettings, sitePolicy, siteSettings, translationAppearance } from '../src/core.js';
 
 export const sample = { term: 'robust', source: 'en', target: 'zh-cn', meaning: '稳健的', example: '', note: '', title: 'Example', url: 'https://example.com/article', createdAt: '2026-11-05T00:00:00.000Z' };
 
@@ -108,6 +108,39 @@ test('Index 预设与 URL 规范化', () => {
   assert.equal(completionEndpoint(INDEX_PRESET.endpoint), 'https://index-translate.bilibili.com/v1/chat/completions');
   assert.equal(completionEndpoint('https://example.com/v1/chat/completions/'), 'https://example.com/v1/chat/completions');
   assert.equal(validateSettings(DEFAULT_SETTINGS).target, 'zh-cn');
+});
+
+test('默认 API 只读，自定义 API 可多选并严格校验', () => {
+  const defaults = validateSettings(DEFAULT_SETTINGS);
+  assert.equal(defaults.apiId, BUILTIN_API_ID);
+  assert.equal(defaults.apiName, 'Index Translate（内置）');
+  assert.deepEqual(defaults.apiProfiles, []);
+  const profile = { id: 'api:one', name: '服务一', protocol: 'openai', endpoint: 'https://one.example/v1', model: 'model-one', extra: {} };
+  const configured = validateSettings({ ...DEFAULT_SETTINGS, apiProfiles: [profile], selectedApiId: profile.id });
+  assert.equal(configured.apiId, profile.id);
+  assert.equal(configured.endpoint, profile.endpoint);
+  assert.equal(configured.model, profile.model);
+  const builtin = validateSettings({ ...DEFAULT_SETTINGS, apiProfiles: [profile], selectedApiId: BUILTIN_API_ID,
+    endpoint: 'https://ignored.example/v1', model: 'ignored' });
+  assert.equal(builtin.apiId, BUILTIN_API_ID);
+  assert.equal(builtin.endpoint, INDEX_PRESET.endpoint);
+  for (const patch of [
+    { selectedApiId: 'api:missing' },
+    { apiProfiles: [profile, profile] },
+    { apiProfiles: [{ ...profile, id: BUILTIN_API_ID }] },
+    { apiProfiles: [{ ...profile, id: 'bad id' }] },
+    { apiProfiles: [{ ...profile, endpoint: 'http://one.example/v1' }] },
+    { apiProfiles: [{ ...profile, model: '' }] },
+    { apiProfiles: Array.from({ length: 21 }, (_value, index) => ({ ...profile, id: `api:${index}` })) },
+  ]) assert.throws(() => validateSettings({ ...DEFAULT_SETTINGS, ...patch }));
+  assert.throws(() => validateApiProfile({ ...profile, id: BUILTIN_API_ID }), /标识/);
+  const legacy = { ...DEFAULT_SETTINGS, protocol: 'gemini', endpoint: 'https://legacy.example/v1beta', model: 'gemini-test', extra: {} };
+  delete legacy.selectedApiId;
+  delete legacy.apiProfiles;
+  const migrated = validateSettings(legacy);
+  assert.equal(migrated.apiProfiles[0].id, 'legacy:api');
+  assert.equal(migrated.selectedApiId, 'legacy:api');
+  assert.equal(migrated.apiProfiles[0].protocol, 'gemini');
 });
 
 test('悬浮按钮功能兼容旧设置并限制为已支持的入口', () => {

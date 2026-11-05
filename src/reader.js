@@ -181,7 +181,7 @@ export function createReader({ document, queue, key, onStatus }) {
     status();
     Promise.resolve().then(() => {
       if (!valid()) return;
-      record.task = queue.enqueue(config, key(serviceEndpoint(config)), record.text, force, bypassCache);
+      record.task = queue.enqueue(config, key(config.apiId, serviceEndpoint(config)), record.text, force, bypassCache);
       return record.task.promise;
     }).then((result) => {
       if (!result || !valid()) return;
